@@ -7,7 +7,7 @@ export const supabase: SupabaseClient = createClient(
 );
 
 // Type exports for convenience
-export type UserRow = { discord_id: string; wallet_address: string | null; balance_sats: number; created_at: string; updated_at: string };
+export type UserRow = { discord_id: string; wallet_address: string | null; balance_sats: number; created_at: string; updated_at: string; username: string | null; display_name: string | null; avatar_url: string | null };
 export type LinkRow = { id: number; discord_id: string; wallet_address: string; linked_at: string };
 export type DepositRow = { id: number; discord_id: string; tx_hash: string; amount_sats: number; block_number: number; created_at: string };
 export type WithdrawalRow = { id: number; discord_id: string; tx_hash: string | null; amount_sats: number; to_address: string; status: string; created_at: string };
