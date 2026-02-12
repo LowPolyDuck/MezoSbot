@@ -14,8 +14,9 @@ import * as treasury from "./treasury.js";
 import * as backfill from "./backfill.js";
 import * as credit from "./credit.js";
 import * as sweep from "./sweep.js";
+import { gameboyCommands } from "./gameboy.js";
 
-export const commands = [
+const baseCommands = [
   link,
   deposit,
   balance,
@@ -31,7 +32,13 @@ export const commands = [
   backfill,
   credit,
   sweep,
-] as const;
+];
+
+// Merge base commands + gameboy button commands into a single list
+export const commands = [
+  ...baseCommands,
+  ...gameboyCommands,
+];
 
 export const commandsData: RESTPostAPIChatInputApplicationCommandsJSONBody[] = commands.map(
   (c) => c.data as RESTPostAPIChatInputApplicationCommandsJSONBody

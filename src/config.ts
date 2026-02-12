@@ -29,6 +29,19 @@ export const config = {
     explorerUrl: optional("EXPLORER_URL", "https://explorer.mezo.org"),
     skipWithdrawalMin: process.env.SKIP_WITHDRAWAL_MIN === "1" || process.env.SKIP_WITHDRAWAL_MIN === "true",
   },
+  gameboy: {
+    /** User account token for the streamer (Discord blocks video from bots) */
+    streamToken: optional("STREAM_USER_TOKEN", ""),
+    guildId: optional("GUILD_ID", ""),
+    stageChannelId: optional("STAGE_CHANNEL_ID", ""),
+    /** Text channel where users type button names to play */
+    gameChannelId: optional("GB_CHANNEL_ID", ""),
+    romPath: optional("ROM_PATH", ""),
+    /** Minimum sats to bid per input */
+    minBid: parseFloat(optional("GB_MIN_BID", "0.001")),
+    /** Auction round duration in ms — bids collected during this window, highest wins */
+    roundMs: parseInt(optional("GB_ROUND_MS", "150"), 10),
+  },
 };
 
 /**
