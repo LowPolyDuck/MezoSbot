@@ -1,0 +1,37 @@
+{
+  "name": "mezosbot",
+  "version": "1.0.0",
+  "description": "Discord bot for depositing sats from EVM, tipping, distributing, and dropping",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "mezo",
+    "bitcoin",
+    "sats",
+    "evm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/qrcode": "^1.5.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
