@@ -29,6 +29,7 @@ export const config = {
     explorerUrl: optional("EXPLORER_URL", "https://explorer.mezo.org"),
     skipWithdrawalMin: process.env.SKIP_WITHDRAWAL_MIN === "1" || process.env.SKIP_WITHDRAWAL_MIN === "true",
   },
+  depositWebUrl: optional("DEPOSIT_WEB_URL", "https://deposit.mallard.sh/sbot"),
   gameboy: {
     /** User account token for the streamer (Discord blocks video from bots) */
     streamToken: optional("STREAM_USER_TOKEN", ""),

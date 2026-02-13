@@ -31,6 +31,7 @@ import {
   type Drop,
 } from "./drops.js";
 import { supabase } from "./db.js";
+import { extractProfile, updateUserProfile } from "./profile.js";
 
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled rejection:", (err as Error)?.message ?? err);
@@ -87,6 +88,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const handler = commandMap.get(interaction.commandName);
   if (!handler) return;
+  const { username, displayName, avatarUrl } = extractProfile(interaction as ChatInputCommandInteraction);
+  updateUserProfile(interaction.user.id, username, displayName, avatarUrl).catch(() => {});
   try {
     await handler(interaction as ChatInputCommandInteraction);
   } catch (err) {

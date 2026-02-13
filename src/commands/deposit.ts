@@ -1,4 +1,4 @@
-import { AttachmentBuilder, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
 import QRCode from "qrcode";
 import { registerDepositAddress } from "../evm.js";
 import { config } from "../config.js";
@@ -35,8 +35,17 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     .setFooter({ text: "This address is unique to you" })
     .setTimestamp();
 
+  const webButton = new ButtonBuilder()
+    .setLabel("Deposit via Wallet")
+    .setStyle(ButtonStyle.Link)
+    .setURL(`${config.depositWebUrl}?uid=${interaction.user.id}`)
+    .setEmoji("🌐");
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(webButton);
+
   await interaction.editReply({
     embeds: [embed],
     files: [attachment],
+    components: [row],
   });
 }
