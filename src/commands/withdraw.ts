@@ -5,7 +5,7 @@ import { supabase } from "../db.js";
 import { config } from "../config.js";
 import { formatSats } from "../format.js";
 
-const MIN_WITHDRAWAL_SATS = 500;
+const MIN_WITHDRAWAL_SATS = parseFloat(process.env.MIN_WITHDRAWAL_SATS ?? "50");
 
 export const data = {
   name: "withdraw",

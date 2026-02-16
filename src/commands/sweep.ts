@@ -12,6 +12,7 @@ import { formatSats } from "../format.js";
 export const data = {
   name: "sweep",
   description: "Admin: sweep deposit wallets to treasury",
+  default_member_permissions: "0",
   options: [
     {
       name: "user",

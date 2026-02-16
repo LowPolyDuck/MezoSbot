@@ -13,6 +13,7 @@ import { formatSats } from "../format.js";
 export const data = {
   name: "backfill",
   description: "Admin: manually check and credit a user's uncredited deposit",
+  default_member_permissions: "0",
   options: [
     { name: "user", type: 6 as const, description: "User to check", required: true },
   ],

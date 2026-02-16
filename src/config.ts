@@ -30,6 +30,7 @@ export const config = {
     skipWithdrawalMin: process.env.SKIP_WITHDRAWAL_MIN === "1" || process.env.SKIP_WITHDRAWAL_MIN === "true",
   },
   depositWebUrl: optional("DEPOSIT_WEB_URL", "https://deposit.mallard.sh/sbot"),
+  depositAdminOnly: process.env.DEPOSIT_ADMIN_ONLY === "1" || process.env.DEPOSIT_ADMIN_ONLY === "true",
   gameboy: {
     /** User account token for the streamer (Discord blocks video from bots) */
     streamToken: optional("STREAM_USER_TOKEN", ""),
@@ -40,8 +41,8 @@ export const config = {
     romPath: optional("ROM_PATH", ""),
     /** Minimum sats to bid per input */
     minBid: parseFloat(optional("GB_MIN_BID", "0.001")),
-    /** Auction round duration in ms — bids collected during this window, highest wins */
-    roundMs: parseInt(optional("GB_ROUND_MS", "150"), 10),
+    /** Democracy round duration in ms — votes collected, button with highest total sats wins */
+    roundMs: parseInt(optional("GB_ROUND_MS", "500"), 10),
   },
 };
 

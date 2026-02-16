@@ -8,6 +8,7 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
   type TextChannel,
+  type Message,
 } from "discord.js";
 import { config } from "./config.js";
 import { formatSats } from "./format.js";
@@ -20,6 +21,7 @@ import {
   getButtonEmoji,
   BUTTONS,
   type GBButton,
+  type RoundResult,
 } from "./emulator.js";
 import { startStream } from "./stream.js";
 import { getBalance, subtractBalance } from "./balance.js";
@@ -53,9 +55,8 @@ const commandMap = new Map(commands.map((c) => [c.data.name, c.execute]));
 
 const TEXT_INPUT_MAP = new Map<string, GBButton>();
 for (const btn of BUTTONS) {
-  TEXT_INPUT_MAP.set(btn.toLowerCase(), btn); // "a", "up", etc.
+  TEXT_INPUT_MAP.set(btn.toLowerCase(), btn);
 }
-// Common aliases
 TEXT_INPUT_MAP.set("u", "UP");
 TEXT_INPUT_MAP.set("d", "DOWN");
 TEXT_INPUT_MAP.set("l", "LEFT");
@@ -72,10 +73,18 @@ client.once(Events.ClientReady, async (c) => {
     { body: commandsData },
   );
   console.log(`Slash commands registered (${commandsData.length} commands)`);
+
+  // Pre-cache the game channel so we never fetch it during gameplay
+  const gcId = config.gameboy.gameChannelId;
+  if (gcId) {
+    try {
+      const ch = await client.channels.fetch(gcId);
+      if (ch && "send" in ch) cachedGameChannel = ch as TextChannel;
+    } catch { /* channel not found */ }
+  }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  /* ---- Button interactions (drop claims) ---- */
   if (interaction.isButton()) {
     const customId = interaction.customId;
     if (customId.startsWith("claim_drop_")) {
@@ -84,7 +93,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  /* ---- Slash commands ---- */
   if (!interaction.isChatInputCommand()) return;
   const handler = commandMap.get(interaction.commandName);
   if (!handler) return;
@@ -103,92 +111,100 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-/* ── Game Boy text input listener ─────────────────────────────── */
+/* ────────────────────────────────────────────────────────────────── */
+/*  Game Boy text input listener                                      */
+/*  ZERO async. No awaits. No API calls. Instant.                     */
+/* ────────────────────────────────────────────────────────────────── */
 
-/**
- * Format: <button> [amount]
- * Examples: "a", "up 5", "b 0.5", "left 100"
- * If no amount given, uses the minimum bid.
- */
-client.on(Events.MessageCreate, async (message) => {
+client.on(Events.MessageCreate, (message) => {
   if (message.author.bot) return;
   const gameChannelId = config.gameboy.gameChannelId;
   if (!gameChannelId || message.channelId !== gameChannelId) return;
 
+  console.log(`[GB] Message in game channel: "${message.content}" from ${message.author.tag}`);
+
   const parts = message.content.trim().toLowerCase().split(/\s+/);
-  const btnStr = parts[0];
-  const button = TEXT_INPUT_MAP.get(btnStr);
+  const button = TEXT_INPUT_MAP.get(parts[0]);
+  if (!button) return; // not a valid input — ignore, don't even delete
 
-  if (!button) {
-    // Not a valid input — silently delete
-    message.delete().catch(() => {});
-    return;
-  }
-
-  // Parse optional bid amount
+  // Parse optional tip amount
   const minBid = config.gameboy.minBid;
   let amount = minBid;
   if (parts[1]) {
-    const parsed = parseFloat(parts[1]);
-    if (!isNaN(parsed) && parsed > 0) {
-      amount = Math.max(parsed, minBid);
-    }
+    const p = parseFloat(parts[1]);
+    if (!isNaN(p) && p > 0) amount = Math.max(p, minBid);
   }
 
-  // Delete the user's message to keep the channel clean
-  message.delete().catch(() => {});
+  // Submit bid — synchronous, instant, no blocking
+  submitBid(message.author.id, button, amount);
 
-  // Check balance before accepting bid
-  const balance = await getBalance(message.author.id);
-  if (balance < amount) {
-    // Silent rejection — don't spam the channel with error messages
-    return;
-  }
-
-  // Ensure deposit address exists
+  // Ensure user has a deposit address (fire-and-forget, first time only)
   registerDepositAddress(message.author.id).catch(() => {});
-
-  // Submit bid to the auction
-  const result = submitBid(message.author.id, button, amount);
-  if (!result.ok) {
-    // Silent — emulator not running or below min bid
-    return;
-  }
 });
 
-/* ── Auction round resolution callback ────────────────────────── */
+/* ────────────────────────────────────────────────────────────────── */
+/*  Democracy round resolution                                        */
+/*  Charges are fire-and-forget. Feed updates throttled to 1/sec.     */
+/*  NOTHING here blocks the emulator or event loop.                   */
+/* ────────────────────────────────────────────────────────────────── */
+
+let cachedGameChannel: TextChannel | null = null;
+let feedMsg: Message | null = null;
+let feedBusy = false;
+let lastFeedTime = 0;
+const FEED_THROTTLE_MS = 1000; // max 1 Discord message edit per second
 
 function setupGameBoyCallbacks() {
-  const gameChannelId = config.gameboy.gameChannelId;
-  if (!gameChannelId) return;
+  if (!config.gameboy.gameChannelId) return;
 
-  onRound(async ({ winner, totalBids }) => {
-    // Charge the winner
-    const charged = await subtractBalance(winner.userId, winner.amount);
-    if (!charged) {
-      // Winner couldn't pay — rare (balance checked at bid time) but possible
-      // No input applied is fine, round just had no winner
-      return;
+  onRound((result: RoundResult) => {
+    const { winningButton, winners, winningSats, tally, totalBids } = result;
+
+    // ── Charge all winning voters — fire and forget ──
+    for (const bid of winners) {
+      subtractBalance(bid.userId, bid.amount).catch(() => {});
     }
 
-    // Post the result to the game channel
-    try {
-      const channel = await client.channels.fetch(gameChannelId);
-      if (!channel || !("send" in channel)) return;
+    // ── Update feed message — throttled, non-blocking ──
+    const now = Date.now();
+    if (feedBusy || now - lastFeedTime < FEED_THROTTLE_MS) return;
+    feedBusy = true;
+    lastFeedTime = now;
 
-      const emoji = getButtonEmoji(winner.button);
-      const bidInfo = totalBids > 1
-        ? ` — won over ${totalBids - 1} other bid${totalBids > 2 ? "s" : ""}`
-        : "";
-
-      await (channel as TextChannel).send({
-        content: `${emoji} **${winner.button}** — <@${winner.userId}> tipped **${formatSats(winner.amount)}**${bidInfo}`,
-        allowedMentions: { parse: [] },
-      });
-    } catch {
-      // Channel send failed — not critical
-    }
+    updateFeed(winningButton, winningSats, tally, totalBids)
+      .catch(() => {})
+      .finally(() => { feedBusy = false; });
   });
+}
+
+async function updateFeed(
+  button: GBButton,
+  sats: number,
+  tally: RoundResult["tally"],
+  totalBids: number,
+) {
+  if (!cachedGameChannel) return;
+
+  const emoji = getButtonEmoji(button);
+  let content = `${emoji} **${button}** — **${formatSats(sats)}** from ${totalBids} vote${totalBids !== 1 ? "s" : ""}`;
+
+  if (tally.length > 1) {
+    const breakdown = tally
+      .map((v) => `${getButtonEmoji(v.button)} ${formatSats(v.totalSats)} (${v.voters.length})`)
+      .join("  ");
+    content += `\n${breakdown}`;
+  }
+
+  try {
+    if (feedMsg) {
+      await feedMsg.edit({ content, allowedMentions: { parse: [] } });
+    } else {
+      feedMsg = await cachedGameChannel.send({ content, allowedMentions: { parse: [] } });
+    }
+  } catch {
+    // Message was deleted or errored — will create a new one next update
+    feedMsg = null;
+  }
 }
 
 /* ── Drop claim button handler ────────────────────────────────── */
@@ -247,7 +263,6 @@ async function main() {
   initEVM();
   console.log(`Treasury: ${getTreasuryAddress()}`);
 
-  // Auto-detect deposits and DM the user
   startDepositPoller((discordId, amountSats, gasSats) => {
     console.log(`Auto-deposit: ${formatSats(amountSats)} (gas: ~${formatSats(gasSats)}) for ${discordId}`);
     client.users.fetch(discordId).then((u) => {
@@ -273,17 +288,13 @@ async function main() {
 
   await client.login(config.discord.token);
 
-  // ── Game Boy emulator + video stream ──
-  const { romPath, streamToken } = config.gameboy;
+  // ── Game Boy emulator + local display ──
+  const { romPath } = config.gameboy;
   if (romPath) {
     try {
       startEmulator(romPath);
       setupGameBoyCallbacks();
-      if (streamToken) {
-        await startStream();
-      } else {
-        console.log("[GameBoy] No STREAM_USER_TOKEN — emulator running but video stream disabled");
-      }
+      await startStream(); // opens an ffplay window — screen share it yourself
     } catch (err) {
       console.error("[GameBoy] Failed to start:", (err as Error)?.message ?? err);
     }

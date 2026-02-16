@@ -9,6 +9,10 @@ export const data = {
 };
 
 export async function execute(interaction: ChatInputCommandInteraction) {
+  if (config.depositAdminOnly && !config.discord.adminIds.includes(interaction.user.id)) {
+    return interaction.reply({ content: "❌ Deposits are currently disabled.", ephemeral: true });
+  }
+
   await interaction.deferReply({ ephemeral: true });
 
   const address = await registerDepositAddress(interaction.user.id);

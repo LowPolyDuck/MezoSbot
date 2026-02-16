@@ -28,7 +28,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const count = interaction.options.getInteger("count", true);
 
   // Fetch recent messages, sort newest-first, pick the last N unique users
-  const fetched = await (channel as TextChannel).messages.fetch({ limit: 100 });
+  let fetched;
+  try {
+    fetched = await (channel as TextChannel).messages.fetch({ limit: 100 });
+  } catch {
+    return interaction.editReply({ content: "❌ I need **Read Message History** permission in this channel to find active users." });
+  }
   const sorted = [...fetched.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
 
   const activeUserIds: string[] = [];

@@ -6,6 +6,7 @@ import { formatSats } from "../format.js";
 export const data = {
   name: "credit",
   description: "Admin: manually credit or debit a user's balance",
+  default_member_permissions: "0",
   options: [
     { name: "user", type: 6 as const, description: "User to credit", required: true },
     { name: "amount", type: 10 as const, description: "Sats to add (negative to debit)", required: true },

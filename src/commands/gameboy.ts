@@ -1,9 +1,9 @@
 /**
  * Game Boy button slash commands (fallback — text input in the game channel is faster).
- * Each one submits a bid to the current auction round.
+ * Each one submits a vote to the current democracy round. Tips are summed per button.
  */
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from "discord.js";
-import { getBalance, subtractBalance } from "../balance.js";
+import { getBalance } from "../balance.js";
 import { submitBid, getButtonEmoji, type GBButton } from "../emulator.js";
 import { config } from "../config.js";
 import { registerDepositAddress } from "../evm.js";
@@ -33,9 +33,9 @@ async function handlePress(interaction: ChatInputCommandInteraction, button: GBB
 
   await registerDepositAddress(interaction.user.id);
 
-  // Bid accepted — winner will be charged when the round resolves
+  // Vote accepted — charged only if this button wins the round
   await interaction.reply({
-    content: `${emoji} Bid **${formatSats(amount)}** on **${button}** — good luck!`,
+    content: `${emoji} Voted **${formatSats(amount)}** on **${button}** — tips are pooled, highest total wins!`,
     ephemeral: true,
   });
 }
@@ -45,10 +45,10 @@ async function handlePress(interaction: ChatInputCommandInteraction, button: GBB
 function btn(name: string, button: GBButton, emoji: string) {
   const data = new SlashCommandBuilder()
     .setName(name)
-    .setDescription(`${emoji} Bid to press ${button}`)
+    .setDescription(`${emoji} Vote to press ${button} (tips pooled per button)`)
     .addNumberOption((opt) =>
       opt.setName("amount")
-        .setDescription(`Sats to bid (min ${config.gameboy.minBid}, highest bid wins)`)
+        .setDescription(`Sats to tip (min ${config.gameboy.minBid}, all tips pooled per button)`)
         .setRequired(false)
         .setMinValue(config.gameboy.minBid)
     );
