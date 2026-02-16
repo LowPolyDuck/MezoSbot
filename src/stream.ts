@@ -1,13 +1,9 @@
 /**
  * Web Canvas display — HTTP server + WebSocket frame streaming.
  *
- * Optimizations for steady FPS:
- * 1. zlib compression — ~92KB raw → ~3-8KB compressed (Game Boy has few colors)
- *    Compressed once per frame, shared across all clients.
- * 2. Skip identical frames — no wasted bandwidth when screen is static.
- * 3. Per-client backpressure — drop frames for slow clients instead of buffering.
- *
- * Client decompresses with the built-in DecompressionStream API.
+ * Key optimization: the emulator outputs 60fps, but we only compress+send
+ * at broadcast time (20fps). Raw frame capture is just a pointer swap — zero cost.
+ * Compression happens once per broadcast, shared across all clients.
  */
 import http from "node:http";
 import { deflateRawSync } from "node:zlib";
@@ -18,10 +14,9 @@ const PORT = parseInt(process.env.PORT ?? "3000", 10);
 const WS_FPS = 20;
 const WS_INTERVAL = 1000 / WS_FPS;
 const FRAME_BYTES = GB_WIDTH * GB_HEIGHT * 4;
-const MAX_BUFFERED = 32 * 1024; // drop frames if client has >32KB queued
+const MAX_BUFFERED = 32 * 1024;
 
-let latestCompressed: Buffer | null = null;
-let frameChanged = false;
+let latestRaw: Buffer | null = null;
 let server: http.Server | null = null;
 let wss: WebSocketServer | null = null;
 let broadcastTimer: ReturnType<typeof setInterval> | null = null;
@@ -142,12 +137,12 @@ const HTML_PAGE = `<!DOCTYPE html>
 const clients = new Set<WebSocket>();
 
 export async function startStream(): Promise<void> {
-  // Capture frames, compress once, share with all clients
+  // Just grab the latest raw frame — this is called 60x/sec but it's
+  // only a buffer reference swap, no copying, no compression
   frameStream.on("data", (chunk: Buffer) => {
-    if (chunk.length < FRAME_BYTES) return;
-    // Compress once — level 1 is fastest, Game Boy palette compresses ~10:1
-    latestCompressed = deflateRawSync(chunk.subarray(0, FRAME_BYTES), { level: 1 });
-    frameChanged = true;
+    if (chunk.length >= FRAME_BYTES) {
+      latestRaw = chunk;
+    }
   });
 
   server = http.createServer((_req, res) => {
@@ -166,14 +161,13 @@ export async function startStream(): Promise<void> {
     ws.on("error", () => clients.delete(ws));
   });
 
-  // Broadcast compressed frame to all clients
+  // Compress + broadcast only at send time (20fps, not 60fps)
   broadcastTimer = setInterval(() => {
-    if (!latestCompressed || !frameChanged || clients.size === 0) return;
-    frameChanged = false;
-    const compressed = latestCompressed;
+    if (!latestRaw || clients.size === 0) return;
+
+    const compressed = deflateRawSync(latestRaw.subarray(0, FRAME_BYTES), { level: 1 });
 
     for (const ws of clients) {
-      // Skip clients that are backed up — they'll get the next frame
       if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED) {
         ws.send(compressed, { binary: true });
       }
