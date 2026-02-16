@@ -32,10 +32,6 @@ export const config = {
   depositWebUrl: optional("DEPOSIT_WEB_URL", "https://deposit.mallard.sh/sbot"),
   depositAdminOnly: process.env.DEPOSIT_ADMIN_ONLY === "1" || process.env.DEPOSIT_ADMIN_ONLY === "true",
   gameboy: {
-    /** User account token for the streamer (Discord blocks video from bots) */
-    streamToken: optional("STREAM_USER_TOKEN", ""),
-    guildId: optional("GUILD_ID", ""),
-    stageChannelId: optional("STAGE_CHANNEL_ID", ""),
     /** Text channel where users type button names to play */
     gameChannelId: optional("GB_CHANNEL_ID", ""),
     romPath: optional("ROM_PATH", ""),

@@ -4,7 +4,7 @@
  * Clean and fast:
  * - Single 60fps timer: emulation + round resolution + frame output.
  * - Pre-allocated frame buffer — zero GC in the hot loop.
- * - Frames go straight to ffplay for local display. No encoding overhead.
+ * - Frames streamed via PassThrough to the web canvas server.
  */
 import fs from "node:fs";
 import { PassThrough } from "node:stream";
@@ -73,7 +73,7 @@ let onRoundResolved: ((result: RoundResult) => void) | null = null;
 // Pre-allocated — never alloc in the hot loop
 const frameBuf = Buffer.alloc(FRAME_BYTES);
 
-// Frames go straight to ffplay stdin via this pipe
+// Frames piped to the web canvas server via this stream
 export const frameStream = new PassThrough({ highWaterMark: FRAME_BYTES * 4 });
 
 // Round timing tracked inline
@@ -129,7 +129,7 @@ function tick(): void {
     screen = gb.doFrame();
   }
 
-  // Write frame — ffplay reads raw RGBA, no encoding needed
+  // Write frame — raw RGBA streamed to web canvas clients
   if (screen && screen.length >= FRAME_BYTES) {
     for (let i = 0; i < FRAME_BYTES; i++) frameBuf[i] = screen[i] & 0xff;
     frameStream.write(frameBuf);

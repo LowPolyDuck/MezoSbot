@@ -239,13 +239,22 @@ export function startDepositPoller(
   setTimeout(poll, 5_000);
 }
 
+export interface WithdrawResult {
+  txHash?: string;
+  error?: string;
+  gasSats?: number;
+  sentSats?: number;
+  /** true if tx was mined and succeeded on-chain */
+  confirmed?: boolean;
+}
+
 /** Withdraw sats from treasury to an address (native send).
  *  Gas fee is deducted from the send amount so the treasury stays solvent.
- *  User's balance is debited `amountSats`, they receive `amountSats - gas`. */
+ *  Waits for on-chain confirmation before returning success. */
 export async function withdraw(
   toAddress: string,
   amountSats: number
-): Promise<{ txHash?: string; error?: string; gasSats?: number; sentSats?: number }> {
+): Promise<WithdrawResult> {
   const normalized = toAddress.toLowerCase().trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(normalized)) return { error: "Invalid address" };
 
@@ -266,17 +275,31 @@ export async function withdraw(
 
   const sentSats = tokenUnitsToSats(sendValue);
 
+  // Send the transaction
+  let tx;
   try {
-    const tx = await wallet.sendTransaction({
+    tx = await wallet.sendTransaction({
       to: normalized,
       value: sendValue,
       gasLimit,
       gasPrice,
     });
-    return { txHash: tx.hash, gasSats, sentSats };
   } catch (e: unknown) {
     const err = e as { message?: string; reason?: string };
     return { error: err?.reason ?? err?.message ?? String(e) };
+  }
+
+  // Wait for on-chain confirmation (60s timeout)
+  try {
+    const receipt = await tx.wait(1, 60_000);
+    if (!receipt || receipt.status === 0) {
+      return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Transaction reverted on-chain" };
+    }
+    return { txHash: tx.hash, gasSats, sentSats, confirmed: true };
+  } catch (e: unknown) {
+    // Timeout or network error — tx may still confirm later
+    const err = e as { message?: string };
+    return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: `Receipt timeout: ${err?.message ?? "unknown"}` };
   }
 }
 

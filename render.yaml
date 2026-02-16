@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: mezosbot
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        generateValue: false
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: RPC_URL
+        sync: false
+      - key: CHAIN_ID
+        value: "31612"
+      - key: TOKEN_CONTRACT
+        value: "0x7b7C000000000000000000000000000000000000"
+      - key: TOKEN_DECIMALS
+        value: "18"
+      - key: TREASURY_PRIVATE_KEY
+        sync: false
+      - key: EXPLORER_URL
+        value: "https://explorer.mezo.org"
+      - key: MIN_WITHDRAWAL_SATS
+        value: "50"
+      - key: SKIP_WITHDRAWAL_MIN
+        value: "false"
+      - key: DEPOSIT_ADMIN_ONLY
+        value: "false"
+      - key: GB_CHANNEL_ID
+        sync: false
+      - key: ROM_PATH
+        value: "./pokeyellow.gbc"
+      - key: GB_MIN_BID
+        value: "0.001"
+      - key: GB_ROUND_MS
+        value: "500"
+      - key: GB_SPEED
+        value: "3"
+      - key: GB_HOLD_FRAMES
+        value: "16"
