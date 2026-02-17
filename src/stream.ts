@@ -211,31 +211,46 @@ function pushFrameToClients(rgba: Buffer): void {
 
 function startEncodeLoop(): void {
   const intervalMs = Math.floor(1000 / targetFps);
+  let nextFrameTime = Date.now();
+  let loopRunning = true;
 
-  encodeLoop = setInterval(() => {
+  const loop = () => {
+    if (!loopRunning) return;
+
     const now = Date.now();
     const delta = now - lastEncodeTime;
 
-    // Frame skip detection: warn if we're falling behind
-    if (delta > intervalMs * 1.5) {
-      skippedFrameCount++;
-      if (skippedFrameCount % 10 === 0) {
-        console.warn(`[Stream] Falling behind: ${delta}ms since last frame (target ${intervalMs}ms) - ${skippedFrameCount} skips total`);
+    // Check if it's time to send the next frame
+    if (now >= nextFrameTime) {
+      // Frame skip detection: warn if we're falling behind
+      if (delta > intervalMs * 1.5) {
+        skippedFrameCount++;
+        if (skippedFrameCount % 10 === 0) {
+          console.warn(`[Stream] Falling behind: ${delta}ms since last frame (target ${intervalMs}ms) - ${skippedFrameCount} skips total`);
+        }
+      }
+
+      lastEncodeTime = now;
+      nextFrameTime = now + intervalMs;
+
+      const ref = getLatestFrameRef();
+      if (ref && latestObservedFrame) {
+        // Send immediately - no deferral for lowest latency
+        pushFrameToClients(ref.frame);
       }
     }
 
-    lastEncodeTime = now;
+    // Schedule next iteration immediately for tightest loop
+    setImmediate(loop);
+  };
 
-    if (!latestObservedFrame) return;
+  // Start the loop
+  setImmediate(loop);
 
-    const ref = getLatestFrameRef();
-    if (!ref) return;
-
-    // Defer send to next event loop tick (non-blocking)
-    process.nextTick(() => {
-      pushFrameToClients(ref.frame);
-    });
-  }, intervalMs);
+  // Store reference to stop loop later
+  encodeLoop = {
+    stop: () => { loopRunning = false; }
+  } as any;
 }
 
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -332,8 +347,8 @@ export async function startStream(): Promise<void> {
 }
 
 export function stopStream(): void {
-  if (encodeLoop) {
-    clearInterval(encodeLoop);
+  if (encodeLoop && typeof (encodeLoop as any).stop === 'function') {
+    (encodeLoop as any).stop();
     encodeLoop = null;
   }
   if (unsubscribeFrames) {
