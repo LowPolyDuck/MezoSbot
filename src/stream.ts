@@ -99,30 +99,9 @@ function buildViewerHtml(): string {
 
     let ws;
     let reconnectTimer;
-    let latestFrame = null;
     let frameCount = 0;
     let lastFpsUpdate = Date.now();
-
-    // Render loop using requestAnimationFrame for smooth 60fps display
-    function render() {
-      if (latestFrame) {
-        const rgba = new Uint8ClampedArray(latestFrame);
-        const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
-        ctx.putImageData(imageData, 0, 0);
-        latestFrame = null;
-
-        // Update FPS counter
-        frameCount++;
-        const now = Date.now();
-        if (now - lastFpsUpdate >= 1000) {
-          status.textContent = 'Connected - ' + frameCount + ' fps';
-          frameCount = 0;
-          lastFpsUpdate = now;
-        }
-      }
-      requestAnimationFrame(render);
-    }
-    requestAnimationFrame(render);
+    let lastFrameTime = 0;
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -133,12 +112,29 @@ function buildViewerHtml(): string {
       ws.onopen = () => {
         status.textContent = 'Connected';
         status.style.color = '#10b981';
+        frameCount = 0;
+        lastFpsUpdate = Date.now();
       };
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          // Store frame for next render cycle
-          latestFrame = event.data;
+          // Render immediately - synchronous with frame arrival
+          const rgba = new Uint8ClampedArray(event.data);
+          const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
+          ctx.putImageData(imageData, 0, 0);
+
+          // Update FPS counter
+          frameCount++;
+          const now = Date.now();
+          const timeSinceLastFrame = now - lastFrameTime;
+          lastFrameTime = now;
+
+          if (now - lastFpsUpdate >= 1000) {
+            const avgMs = timeSinceLastFrame;
+            status.textContent = 'Connected - ' + frameCount + ' fps (' + avgMs.toFixed(0) + 'ms)';
+            frameCount = 0;
+            lastFpsUpdate = now;
+          }
         }
       };
 
@@ -193,7 +189,7 @@ function pushFrameToClients(rgba: Buffer): void {
 
   const encodeStart = Date.now();
   const deadClients: string[] = [];
-  const maxBuffered = 512 * 1024; // 512KB buffer limit per client - fail fast if client is slow
+  const maxBuffered = 2 * 1024 * 1024; // 2MB buffer limit - generous for 30fps
 
   // Send raw RGBA data to all connected clients in parallel
   for (const client of streamClients.values()) {
@@ -202,16 +198,14 @@ function pushFrameToClients(rgba: Buffer): void {
       continue;
     }
 
-    // Skip send if client's buffer is backed up (backpressure handling)
+    // Skip send if client's buffer is severely backed up
     if (client.ws.bufferedAmount > maxBuffered) {
-      console.warn(`[Stream] Client ${client.id} buffer full (${client.ws.bufferedAmount} bytes), skipping frame`);
-      continue;
+      continue; // Silently skip - client will catch up
     }
 
     // Non-blocking send with error handling via callback
     client.ws.send(rgba, { binary: true }, (err) => {
       if (err) {
-        console.error(`[Stream] Send error to ${client.id}:`, err.message);
         deadClients.push(client.id);
       }
     });
@@ -238,12 +232,9 @@ function startEncodeLoop(): void {
     const frame = getLatestFrameCopy(sourceFrameCopy);
     if (!frame) return;
 
+    // Track emulator frames we're skipping (expected when encode FPS < emulator FPS)
     if (stats.lastProducedSeq > 0 && frame.meta.seq > stats.lastProducedSeq + 1) {
-      const dropped = frame.meta.seq - stats.lastProducedSeq - 1;
-      stats.droppedFrames += dropped;
-      if (dropped > 10) {
-        console.warn(`[Stream] Dropped ${dropped} frames`);
-      }
+      stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
     }
     stats.lastProducedSeq = frame.meta.seq;
 
