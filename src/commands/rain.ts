@@ -62,10 +62,13 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
   }
 
-  for (const uid of activeUserIds) {
-    await addBalance(uid, perUser);
-    await registerDepositAddress(uid);
-  }
+  // Parallelize balance additions and address registrations
+  await Promise.all(
+    activeUserIds.map(async (uid) => {
+      await addBalance(uid, perUser);
+      await registerDepositAddress(uid).catch(() => {}); // Fire-and-forget address registration
+    })
+  );
 
   const recipients = activeUserIds.map((id) => `<@${id}>`).join("\n");
 

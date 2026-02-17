@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { URL } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  getLatestFrameCopy,
+  getLatestFrameRef,
   subscribeFrames,
   GB_WIDTH,
   GB_HEIGHT,
@@ -38,7 +38,6 @@ let wss: WebSocketServer | null = null;
 let encodeLoop: ReturnType<typeof setTimeout> | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
-let sourceFrameCopy = Buffer.alloc(GB_WIDTH * GB_HEIGHT * 4);
 const requestedFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
 const minFps = Math.max(1, Math.min(requestedFps, config.streaming.minFps));
 let currentEncodeFps = requestedFps;
@@ -99,6 +98,30 @@ function buildViewerHtml(): string {
 
     let ws;
     let reconnectTimer;
+    let latestFrame = null;
+    let frameCount = 0;
+    let lastFpsUpdate = Date.now();
+
+    // Render loop using requestAnimationFrame for smooth 60fps display
+    function render() {
+      if (latestFrame) {
+        const rgba = new Uint8ClampedArray(latestFrame);
+        const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
+        ctx.putImageData(imageData, 0, 0);
+        latestFrame = null;
+
+        // Update FPS counter
+        frameCount++;
+        const now = Date.now();
+        if (now - lastFpsUpdate >= 1000) {
+          status.textContent = 'Connected - ' + frameCount + ' fps';
+          frameCount = 0;
+          lastFpsUpdate = now;
+        }
+      }
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -113,9 +136,8 @@ function buildViewerHtml(): string {
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          const rgba = new Uint8ClampedArray(event.data);
-          const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
-          ctx.putImageData(imageData, 0, 0);
+          // Store frame for next render cycle
+          latestFrame = event.data;
         }
       };
 
@@ -169,20 +191,32 @@ function pushFrameToClients(rgba: Buffer): void {
   if (streamClients.size === 0) return;
 
   const encodeStart = Date.now();
+  const deadClients: string[] = [];
+  const maxBuffered = 1024 * 1024; // 1MB buffer limit per client
 
-  // Send raw RGBA data to all connected clients
+  // Send raw RGBA data to all connected clients in parallel
   for (const client of streamClients.values()) {
-    try {
-      if (client.ws.readyState !== WebSocket.OPEN) {
-        removeClient(client.id);
-        continue;
-      }
-
-      client.ws.send(rgba, { binary: true });
-    } catch (err) {
-      console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
-      removeClient(client.id);
+    if (client.ws.readyState !== WebSocket.OPEN) {
+      deadClients.push(client.id);
+      continue;
     }
+
+    // Skip send if client's buffer is backed up (backpressure handling)
+    if (client.ws.bufferedAmount > maxBuffered) {
+      continue;
+    }
+
+    // Non-blocking send with error handling via callback
+    client.ws.send(rgba, { binary: true }, (err) => {
+      if (err) {
+        deadClients.push(client.id);
+      }
+    });
+  }
+
+  // Clean up dead clients after iteration completes
+  for (const id of deadClients) {
+    removeClient(id);
   }
 
   stats.encodedFrames += 1;
@@ -192,27 +226,29 @@ function pushFrameToClients(rgba: Buffer): void {
 }
 
 function startEncodeLoop(): void {
-  const loop = () => {
+  const intervalMs = Math.round(1000 / Math.max(1, currentEncodeFps));
+  let frameCount = 0;
+
+  encodeLoop = setInterval(() => {
     if (!latestObservedFrame) return;
-    const frame = getLatestFrameCopy(sourceFrameCopy);
+
+    // Zero-copy: use direct reference to emulator's frame buffer
+    const frame = getLatestFrameRef();
     if (!frame) return;
+
     if (stats.lastProducedSeq > 0 && frame.meta.seq > stats.lastProducedSeq + 1) {
       stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
     }
     stats.lastProducedSeq = frame.meta.seq;
-    pushFrameToClients(sourceFrameCopy);
-  };
 
-  const schedule = () => {
-    const intervalMs = Math.round(1000 / Math.max(1, currentEncodeFps));
-    encodeLoop = setTimeout(() => {
-      loop();
+    pushFrameToClients(frame.frame);
+
+    // Only check auto-tune every 300 frames (~5 seconds at 60fps)
+    if (config.streaming.autoTune && ++frameCount >= 300) {
+      frameCount = 0;
       maybeAutoTune();
-      schedule();
-    }, intervalMs);
-  };
-
-  schedule();
+    }
+  }, intervalMs) as any;
 }
 
 function maybeAutoTune(): void {
@@ -224,10 +260,12 @@ function maybeAutoTune(): void {
   const droppedInWindow = stats.droppedFrames - tuneDroppedStart;
   const dropRatio = droppedInWindow / producedInWindow;
 
-  if (dropRatio > 0.25 && currentEncodeFps > minFps) {
+  // Only reduce FPS under extreme drop conditions (>50% instead of >25%)
+  if (dropRatio > 0.5 && currentEncodeFps > minFps) {
     currentEncodeFps = Math.max(minFps, currentEncodeFps - 5);
-  } else if (dropRatio < 0.05 && currentEncodeFps < requestedFps) {
-    currentEncodeFps = Math.min(requestedFps, currentEncodeFps + 5);
+  } else if (dropRatio < 0.1 && currentEncodeFps < requestedFps) {
+    // Increase FPS more aggressively
+    currentEncodeFps = Math.min(requestedFps, currentEncodeFps + 10);
   }
 
   stats.currentEncodeFps = currentEncodeFps;
@@ -324,7 +362,7 @@ export async function startStream(): Promise<void> {
 
 export function stopStream(): void {
   if (encodeLoop) {
-    clearTimeout(encodeLoop);
+    clearInterval(encodeLoop);
     encodeLoop = null;
   }
   if (unsubscribeFrames) {

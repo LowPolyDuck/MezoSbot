@@ -2,23 +2,24 @@ import { supabase } from "./db.js";
 import { roundSats } from "./format.js";
 
 export async function getOrCreateUser(discordId: string) {
-  const { data: existing } = await supabase
+  // Use upsert with onConflict to avoid duplicate inserts, select to return the row
+  const { data, error } = await supabase
     .from("users")
+    .upsert({ discord_id: discordId }, { onConflict: "discord_id", ignoreDuplicates: true })
     .select("*")
-    .eq("discord_id", discordId)
     .single();
 
-  if (existing) return existing as { discord_id: string; wallet_address: string | null; balance_sats: number };
+  if (error) {
+    // If upsert failed, fall back to select (row may already exist)
+    const { data: existing } = await supabase
+      .from("users")
+      .select("*")
+      .eq("discord_id", discordId)
+      .single();
+    return existing as { discord_id: string; wallet_address: string | null; balance_sats: number };
+  }
 
-  await supabase.from("users").insert({ discord_id: discordId });
-
-  const { data: created } = await supabase
-    .from("users")
-    .select("*")
-    .eq("discord_id", discordId)
-    .single();
-
-  return created as { discord_id: string; wallet_address: string | null; balance_sats: number };
+  return data as { discord_id: string; wallet_address: string | null; balance_sats: number };
 }
 
 export async function getBalance(discordId: string): Promise<number> {

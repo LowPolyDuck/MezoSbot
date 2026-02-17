@@ -176,61 +176,77 @@ export function startDepositPoller(
       .from("deposit_addresses")
       .select("*");
 
-    if (!rows) return;
+    if (!rows || rows.length === 0) return;
 
-    for (const row of rows as DepositAddressRow[]) {
-      try {
+    // Parallelize all balance checks
+    const balanceChecks = await Promise.allSettled(
+      (rows as DepositAddressRow[]).map(async (row) => {
         const bal = await provider.getBalance(row.address);
-        const prev = BigInt(row.last_checked_balance || "0");
+        return { row, bal };
+      })
+    );
 
-        // ── Credit only when balance INCREASES (new deposit arrived) ──
-        if (bal > prev) {
-          const diff = bal - prev;
+    // Process results and credit new deposits
+    const updates: Array<{ discord_id: string; balance: string }> = [];
 
-          // Exact gas cost — matches the pinned gasPrice on the sweep tx
-          const gasPrice = await getGasPrice();
-          const gasCost = 21000n * gasPrice;
-          const netDeposit = diff - gasCost;
+    for (const result of balanceChecks) {
+      if (result.status === 'rejected') continue;
 
-          if (netDeposit > 0n) {
-            const netSats = tokenUnitsToSats(netDeposit);
-            const gasSats = tokenUnitsToSats(gasCost);
+      const { row, bal } = result.value;
+      const prev = BigInt(row.last_checked_balance || "0");
 
-            if (netSats > 0) {
-              const txId = `auto-${Date.now()}-${row.discord_id}`;
-              await supabase.from("deposits").insert({
-                discord_id: row.discord_id,
-                tx_hash: txId,
-                amount_sats: netSats,
-                block_number: 0,
-              });
-              await addBalance(row.discord_id, netSats);
-              onDeposit?.(row.discord_id, netSats, gasSats);
-            }
-          } else {
-            console.log(
-              `Deposit too small to cover gas for ${row.discord_id}: ${diff} wei < gas ${gasCost} wei`
-            );
+      // ── Credit only when balance INCREASES (new deposit arrived) ──
+      if (bal > prev) {
+        const diff = bal - prev;
+
+        // Exact gas cost — matches the pinned gasPrice on the sweep tx
+        const gasPrice = await getGasPrice();
+        const gasCost = 21000n * gasPrice;
+        const netDeposit = diff - gasCost;
+
+        if (netDeposit > 0n) {
+          const netSats = tokenUnitsToSats(netDeposit);
+          const gasSats = tokenUnitsToSats(gasCost);
+
+          if (netSats > 0) {
+            const txId = `auto-${Date.now()}-${row.discord_id}`;
+            await supabase.from("deposits").insert({
+              discord_id: row.discord_id,
+              tx_hash: txId,
+              amount_sats: netSats,
+              block_number: 0,
+            });
+            await addBalance(row.discord_id, netSats);
+            onDeposit?.(row.discord_id, netSats, gasSats);
           }
-
-          // ── Sweep immediately after crediting a new deposit ──
-          sweepToTreasury(row.discord_id).catch((err) => {
-            console.error(
-              `Sweep failed for ${row.discord_id}:`,
-              (err as Error)?.message ?? err
-            );
-          });
+        } else {
+          console.log(
+            `Deposit too small to cover gas for ${row.discord_id}: ${diff} wei < gas ${gasCost} wei`
+          );
         }
 
-        // ── ALWAYS sync tracked balance to the real chain value ──
-        await supabase
-          .from("deposit_addresses")
-          .update({ last_checked_balance: bal.toString() })
-          .eq("discord_id", row.discord_id);
-      } catch {
-        // Skip this address on error
+        // ── Sweep immediately after crediting a new deposit ──
+        sweepToTreasury(row.discord_id).catch((err) => {
+          console.error(
+            `Sweep failed for ${row.discord_id}:`,
+            (err as Error)?.message ?? err
+          );
+        });
       }
+
+      // Collect balance update for batch processing
+      updates.push({ discord_id: row.discord_id, balance: bal.toString() });
     }
+
+    // ── Batch update all balances in parallel ──
+    await Promise.all(
+      updates.map((u) =>
+        supabase
+          .from("deposit_addresses")
+          .update({ last_checked_balance: u.balance })
+          .eq("discord_id", u.discord_id)
+      )
+    );
   };
 
   // Poll every 15 seconds
