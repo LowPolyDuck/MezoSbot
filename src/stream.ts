@@ -264,26 +264,12 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     }
   });
 
+  // Set remote description FIRST to see client's transceivers
+  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
+
   // Create video source and track
   const source = new RTCVideoSource();
   const track = source.createTrack();
-
-  // Use addTransceiver to explicitly control negotiation
-  const transceiver = pc.addTransceiver(track, {
-    direction: "sendonly",
-    streams: [new MediaStream([track])],
-  });
-
-  console.log(`[Stream] Added transceiver (direction: ${transceiver.direction})`);
-
-  // Set remote description
-  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
-
-  // Create answer
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-
-  console.log(`[Stream] Answer SDP:`, answer.sdp?.substring(0, 300));
 
   // Send an initial black frame to activate the track
   const blackFrame = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2), 0);
@@ -293,7 +279,31 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     data: blackFrame,
   });
 
+  // Get the transceiver created by the client's offer
+  const transceivers = pc.getTransceivers();
+  console.log(`[Stream] Transceivers count: ${transceivers.length}`);
+
+  let transceiver = transceivers.find((t: any) => t.receiver && t.receiver.track && t.receiver.track.kind === "video");
+
+  if (transceiver) {
+    // Replace the track on the existing transceiver
+    console.log(`[Stream] Found video transceiver, replacing track (current direction: ${transceiver.direction})`);
+    await transceiver.sender.replaceTrack(track);
+    transceiver.direction = "sendonly";
+  } else {
+    // No transceiver, add one (shouldn't happen with offerToReceiveVideo)
+    console.log(`[Stream] No video transceiver found, adding new one`);
+    transceiver = pc.addTransceiver(track, { direction: "sendonly" });
+  }
+
   const stream = new MediaStream([track]);
+
+  // Create answer
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  console.log(`[Stream] Answer SDP has video:`, answer.sdp?.includes("m=video"));
+  console.log(`[Stream] Answer SDP preview:`, answer.sdp?.substring(0, 400));
   await waitForIceGatheringComplete(pc);
 
   streamClients.set(clientId, {
