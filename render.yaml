@@ -51,8 +51,6 @@ services:
         value: "3"
       - key: GB_HOLD_FRAMES
         value: "16"
-      - key: STREAM_PORT
-        sync: false
       - key: STREAM_TARGET_FPS
         value: "30"
       - key: STREAM_MIN_FPS
