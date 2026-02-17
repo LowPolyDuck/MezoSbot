@@ -243,9 +243,6 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
   const pc = new RTCPeerConnection({
     iceServers: config.streaming.stunServers.map((urls) => ({ urls })),
   });
-  const source = new RTCVideoSource();
-  const track = source.createTrack();
-  pc.addTrack(track);
 
   pc.addEventListener("connectionstatechange", () => {
     const state = pc.connectionState;
@@ -254,7 +251,13 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     }
   });
 
+  // Set remote description first, THEN add our track
   await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
+
+  const source = new RTCVideoSource();
+  const track = source.createTrack();
+  pc.addTrack(track);
+
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   await waitForIceGatheringComplete(pc);
@@ -267,6 +270,8 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     connectedAtMs: Date.now(),
   });
   stats.activeClients = streamClients.size;
+
+  console.log(`[Stream] Client ${clientId} connected (${streamClients.size} active)`);
 
   const local = pc.localDescription;
   sendJson(res, 200, { type: local.type, sdp: local.sdp });
@@ -326,7 +331,8 @@ function pushFrameToClients(rgba: Buffer): void {
         height: GB_HEIGHT,
         data,
       });
-    } catch {
+    } catch (err) {
+      console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
       removeClient(client.id);
     }
   }
