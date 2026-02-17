@@ -35,12 +35,9 @@ interface StreamStats {
 const streamClients = new Map<string, StreamClient>();
 let httpServer: Server | null = null;
 let wss: WebSocketServer | null = null;
-let encodeLoop: NodeJS.Timeout | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
 const targetFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
-let lastEncodeTime = Date.now();
-let skippedFrameCount = 0;
 
 const stats: StreamStats = {
   producedFrames: 0,
@@ -177,11 +174,10 @@ function removeClient(id: string): void {
 function pushFrameToClients(rgba: Buffer): void {
   if (streamClients.size === 0) return;
 
-  const encodeStart = Date.now();
   const deadClients: string[] = [];
   const MAX_BUFFER_SIZE = 2 * 1024 * 1024; // 2MB backpressure limit per client
 
-  // Send to all clients in parallel with backpressure handling
+  // Send to all clients with backpressure handling
   for (const client of streamClients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) {
       deadClients.push(client.id);
@@ -191,7 +187,7 @@ function pushFrameToClients(rgba: Buffer): void {
     // Backpressure check: skip frame if client's send buffer is backed up
     if (client.ws.bufferedAmount > MAX_BUFFER_SIZE) {
       stats.droppedFrames++;
-      continue; // Skip this frame for this slow client
+      continue;
     }
 
     client.ws.send(rgba, { binary: true }, (err) => {
@@ -203,54 +199,8 @@ function pushFrameToClients(rgba: Buffer): void {
     removeClient(id);
   }
 
-  stats.encodedFrames += 1;
-  const elapsed = Date.now() - encodeStart;
-  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.9 + elapsed * 0.1;
+  stats.encodedFrames++;
   stats.lastSentFrameAtMs = Date.now();
-}
-
-function startEncodeLoop(): void {
-  const intervalMs = Math.floor(1000 / targetFps);
-  let nextFrameTime = Date.now();
-  let loopRunning = true;
-
-  const loop = () => {
-    if (!loopRunning) return;
-
-    const now = Date.now();
-    const delta = now - lastEncodeTime;
-
-    // Check if it's time to send the next frame
-    if (now >= nextFrameTime) {
-      // Frame skip detection: warn if we're falling behind
-      if (delta > intervalMs * 1.5) {
-        skippedFrameCount++;
-        if (skippedFrameCount % 10 === 0) {
-          console.warn(`[Stream] Falling behind: ${delta}ms since last frame (target ${intervalMs}ms) - ${skippedFrameCount} skips total`);
-        }
-      }
-
-      lastEncodeTime = now;
-      nextFrameTime = now + intervalMs;
-
-      const ref = getLatestFrameRef();
-      if (ref && latestObservedFrame) {
-        // Send immediately - no deferral for lowest latency
-        pushFrameToClients(ref.frame);
-      }
-    }
-
-    // Schedule next iteration immediately for tightest loop
-    setImmediate(loop);
-  };
-
-  // Start the loop
-  setImmediate(loop);
-
-  // Store reference to stop loop later
-  encodeLoop = {
-    stop: () => { loopRunning = false; }
-  } as any;
 }
 
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -289,15 +239,18 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 export async function startStream(): Promise<void> {
   if (httpServer) return;
 
-  // Subscribe to track emulator frames
+  // Subscribe to emulator frames and forward immediately (no sampling loop)
   unsubscribeFrames = subscribeFrames((meta) => {
     latestObservedFrame = meta;
     stats.producedFrames += 1;
     stats.lastSourceFrameAtMs = meta.capturedAtMs;
-  });
 
-  // Start sampling loop at target FPS
-  startEncodeLoop();
+    // Send frame immediately as emulator produces it
+    const ref = getLatestFrameRef();
+    if (ref) {
+      pushFrameToClients(ref.frame);
+    }
+  });
 
   await new Promise<void>((resolve) => {
     httpServer = createServer((req, res) => {
@@ -347,10 +300,6 @@ export async function startStream(): Promise<void> {
 }
 
 export function stopStream(): void {
-  if (encodeLoop && typeof (encodeLoop as any).stop === 'function') {
-    (encodeLoop as any).stop();
-    encodeLoop = null;
-  }
   if (unsubscribeFrames) {
     unsubscribeFrames();
     unsubscribeFrames = null;
