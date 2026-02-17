@@ -264,9 +264,10 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     }
   });
 
-  // Set remote description first, THEN add our track
+  // Set remote description to see what the client wants
   await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
 
+  // Create video source and track
   const source = new RTCVideoSource();
   const track = source.createTrack();
 
@@ -278,12 +279,27 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     data: blackFrame,
   });
 
-  const stream = new MediaStream();
-  stream.addTrack(track);
-  pc.addTrack(track, stream);
+  // Check transceivers and add track
+  console.log(`[Stream] Transceivers:`, pc.getTransceivers().length);
+  const transceivers = pc.getTransceivers();
+  const videoTransceiver = transceivers.find((t: any) => t.receiver?.track?.kind === "video");
+
+  if (videoTransceiver) {
+    console.log(`[Stream] Found existing video transceiver, direction: ${videoTransceiver.direction}`);
+    await videoTransceiver.sender.replaceTrack(track);
+    videoTransceiver.direction = "sendonly";
+  } else {
+    console.log(`[Stream] No existing transceiver, adding track`);
+    pc.addTrack(track);
+  }
+
+  const stream = new MediaStream([track]);
 
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
+
+  console.log(`[Stream] Answer created, video transceivers:`,
+    pc.getTransceivers().filter((t: any) => t.receiver?.track?.kind === "video").length);
   await waitForIceGatheringComplete(pc);
 
   streamClients.set(clientId, {
