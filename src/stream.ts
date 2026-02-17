@@ -134,9 +134,20 @@ function buildViewerHtml(): string {
 
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       pc.ontrack = (event) => {
-        video.srcObject = event.streams[0];
+        console.log("ontrack event:", event);
+        console.log("streams:", event.streams);
+        console.log("track:", event.track);
+        if (event.streams && event.streams[0]) {
+          console.log("Setting video srcObject to stream:", event.streams[0]);
+          video.srcObject = event.streams[0];
+        } else {
+          console.warn("No streams in track event, creating manual MediaStream");
+          const stream = new MediaStream([event.track]);
+          video.srcObject = stream;
+        }
       };
       pc.onconnectionstatechange = () => {
+        console.log("Connection state:", pc.connectionState);
         statusEl.textContent = pc.connectionState;
       };
 
@@ -258,6 +269,15 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
 
   const source = new RTCVideoSource();
   const track = source.createTrack();
+
+  // Send an initial black frame to activate the track
+  const blackFrame = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2), 0);
+  source.onFrame({
+    width: GB_WIDTH,
+    height: GB_HEIGHT,
+    data: blackFrame,
+  });
+
   const stream = new MediaStream();
   stream.addTrack(track);
   pc.addTrack(track, stream);
