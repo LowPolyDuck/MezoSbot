@@ -5,8 +5,10 @@
  * - Single 60fps timer: emulation + round resolution + frame output.
  * - Pre-allocated frame buffer — zero GC in the hot loop.
  * - Frames are published through a latest-frame API for stream transports.
+ * - Persistent save states: SRAM auto-saved every 30s and on shutdown.
  */
 import fs from "node:fs";
+import path from "node:path";
 import { config } from "./config.js";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -23,6 +25,8 @@ const TICK_MS = 1000 / STREAM_FPS;
 const FRAMES_PER_TICK = BASE_SPEED;
 const HOLD_FRAMES = parseInt(process.env.GB_HOLD_FRAMES ?? "16", 10);
 const FRAME_BYTES = GB_WIDTH * GB_HEIGHT * 4;
+const SAVE_INTERVAL_MS = 30000; // Auto-save every 30 seconds
+const SAVES_DIR = path.join(process.cwd(), "saves");
 
 export interface FrameMeta {
   width: number;
@@ -73,6 +77,8 @@ export function getCurrentBidCount(): number { return bidPool.size; }
 let gb: any = null;
 let running = false;
 let loopHandle: ReturnType<typeof setInterval> | null = null;
+let saveHandle: ReturnType<typeof setInterval> | null = null;
+let currentRomPath: string | null = null;
 let activeButton: GBButton | null = null;
 let activeHoldRemaining = 0;
 let onRoundResolved: ((result: RoundResult) => void) | null = null;
@@ -128,25 +134,88 @@ export function getLatestFrameCopy(target?: Buffer): { frame: Buffer; meta: Fram
   return { frame: out, meta: latestMeta };
 }
 
+/* ── Save state management ─────────────────────────────────────────── */
+
+function getSaveFilePath(romPath: string): string {
+  const romName = path.basename(romPath, path.extname(romPath));
+  return path.join(SAVES_DIR, `${romName}.sav`);
+}
+
+function loadSaveState(romPath: string): any[] | null {
+  const savePath = getSaveFilePath(romPath);
+  try {
+    if (fs.existsSync(savePath)) {
+      const saveData = JSON.parse(fs.readFileSync(savePath, "utf-8"));
+      console.log(`[Emulator] Loaded save state from ${savePath}`);
+      return saveData;
+    }
+  } catch (err) {
+    console.warn(`[Emulator] Failed to load save state:`, (err as Error)?.message ?? err);
+  }
+  return null;
+}
+
+function saveSaveState(): void {
+  if (!gb || !running || !currentRomPath) return;
+
+  try {
+    const saveData = gb.getSaveData();
+    if (!saveData || saveData.length === 0) return; // No save data to persist
+
+    // Ensure saves directory exists
+    if (!fs.existsSync(SAVES_DIR)) {
+      fs.mkdirSync(SAVES_DIR, { recursive: true });
+    }
+
+    const savePath = getSaveFilePath(currentRomPath);
+    fs.writeFileSync(savePath, JSON.stringify(saveData), "utf-8");
+    console.log(`[Emulator] Saved game state to ${savePath}`);
+  } catch (err) {
+    console.error(`[Emulator] Failed to save state:`, (err as Error)?.message ?? err);
+  }
+}
+
 export function startEmulator(romPath: string): void {
   if (running) return;
+
+  currentRomPath = romPath;
+  const romData = fs.readFileSync(romPath);
+  const saveData = loadSaveState(romPath);
+
   gb = new Gameboy();
-  gb.loadRom(fs.readFileSync(romPath));
+  gb.loadRom(romData, saveData);
   running = true;
   roundMs = config.gameboy.roundMs;
   msSinceLastRound = 0;
+
+  // Start emulation loop
   loopHandle = setInterval(tick, TICK_MS);
+
+  // Start auto-save loop
+  saveHandle = setInterval(saveSaveState, SAVE_INTERVAL_MS);
+
   console.log(`[Emulator] Started | ${BASE_SPEED}× | ${FRAMES_PER_TICK}f/tick @ ${STREAM_FPS}fps | hold=${HOLD_FRAMES}f | ${roundMs}ms rounds`);
+  if (saveData) {
+    console.log(`[Emulator] Continuing from saved game state`);
+  }
 }
 
 export function stopEmulator(): void {
   if (!running) return;
+
+  // Save state before shutdown
+  saveSaveState();
+
   running = false;
   if (loopHandle) clearInterval(loopHandle);
+  if (saveHandle) clearInterval(saveHandle);
   loopHandle = null;
+  saveHandle = null;
   bidPool.clear();
   latestFrame = null;
   latestMeta = null;
+  currentRomPath = null;
+  console.log(`[Emulator] Stopped and saved game state`);
 }
 
 /* ── Single tick — emulation + rounds + frame output ───────────────── */

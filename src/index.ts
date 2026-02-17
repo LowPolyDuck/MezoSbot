@@ -16,6 +16,7 @@ import { initEVM, getTreasuryAddress, startDepositPoller, registerDepositAddress
 import { commands, commandsData } from "./commands/index.js";
 import {
   startEmulator,
+  stopEmulator,
   submitBid,
   onRound,
   getButtonEmoji,
@@ -304,5 +305,18 @@ async function main() {
   // ── Web canvas server (always starts — needed for Render health checks) ──
   await startStream();
 }
+
+// Graceful shutdown: save game state before exit
+process.on("SIGINT", () => {
+  console.log("\n[Shutdown] Received SIGINT, saving game state...");
+  stopEmulator();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  console.log("\n[Shutdown] Received SIGTERM, saving game state...");
+  stopEmulator();
+  process.exit(0);
+});
 
 main().catch(console.error);
