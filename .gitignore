@@ -4,3 +4,4 @@ dist/
 mezosbot.db
 *.log
 .DS_Store
+saves/
