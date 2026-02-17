@@ -52,11 +52,11 @@ services:
       - key: GB_HOLD_FRAMES
         value: "15"
       - key: STREAM_TARGET_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_MIN_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_MAX_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_AUTO_TUNE
         value: "false"
       - key: STREAM_VIEWER_SCALE
