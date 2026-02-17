@@ -23,7 +23,7 @@ import {
   type GBButton,
   type RoundResult,
 } from "./emulator.js";
-import { startStream } from "./webrtc-stream.js";
+import { startStream } from "./stream.js";
 import { getBalance, subtractBalance } from "./balance.js";
 import {
   processClaim,
