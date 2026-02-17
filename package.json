@@ -26,6 +26,7 @@
     "ethers": "^6.13.4",
     "qrcode": "^1.5.4",
     "serverboy": "^0.0.7",
+    "sharp": "^0.34.5",
     "ws": "^8.18.0"
   },
   "devDependencies": {

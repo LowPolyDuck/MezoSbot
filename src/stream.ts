@@ -1,34 +1,22 @@
 /**
- * Browser stream transport:
- * - HTTP signaling endpoint for WebRTC session setup.
- * - Server-side frame pacing with newest-frame drop policy.
- * - Health + stream metrics for cloud tuning.
+ * Browser stream transport: MJPEG over HTTP
+ * Simple, reliable motion JPEG streaming that works everywhere.
  */
-import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import sharp from "sharp";
 import {
   getLatestFrameCopy,
   subscribeFrames,
   GB_WIDTH,
   GB_HEIGHT,
-  STREAM_FPS,
   type FrameMeta,
 } from "./emulator.js";
 import { config } from "./config.js";
-import { rgbaToI420 } from "./streaming/rgbaToI420.js";
-
-let RTCPeerConnection: any;
-let RTCSessionDescription: any;
-let RTCVideoSource: any;
-let MediaStream: any;
 
 interface StreamClient {
   id: string;
-  pc: InstanceType<typeof RTCPeerConnection>;
-  source: any;
-  track: any;
-  stream: any;
+  res: ServerResponse;
   connectedAtMs: number;
 }
 
@@ -50,7 +38,6 @@ let encodeLoop: ReturnType<typeof setTimeout> | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
 let sourceFrameCopy = Buffer.alloc(GB_WIDTH * GB_HEIGHT * 4);
-const i420Buffer = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2));
 const requestedFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
 const minFps = Math.max(1, Math.min(requestedFps, config.streaming.minFps));
 let currentEncodeFps = requestedFps;
@@ -88,96 +75,15 @@ function buildViewerHtml(): string {
     .wrap { max-width: 960px; margin: 32px auto; padding: 0 16px; }
     h1 { margin: 0 0 8px 0; font-size: 22px; }
     p { margin: 0 0 18px 0; color: #a9b3c7; }
-    video { width: ${ws}px; height: ${hs}px; image-rendering: pixelated; border-radius: 12px; border: 1px solid #1d2330; background: black; }
-    .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
-    button { border: 0; border-radius: 8px; background: #2463eb; color: white; padding: 10px 14px; cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    code { background: #121725; border-radius: 6px; padding: 2px 6px; }
+    img { width: ${ws}px; height: ${hs}px; image-rendering: pixelated; border-radius: 12px; border: 1px solid #1d2330; background: black; display: block; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>MezoSbot Browser Stream</h1>
-    <p>Low-latency viewer. If stream stalls, press reconnect.</p>
-    <video id="video" autoplay playsinline muted></video>
-    <div class="row">
-      <button id="connect">Connect</button>
-      <span id="status">idle</span>
-    </div>
-    <div class="row">
-      <small>Signaling: <code>/api/webrtc/offer</code></small>
-    </div>
+    <p>Low-latency MJPEG viewer.</p>
+    <img src="/stream.mjpeg" alt="Game stream" />
   </div>
-  <script>
-    const statusEl = document.getElementById("status");
-    const connectBtn = document.getElementById("connect");
-    const video = document.getElementById("video");
-    let pc = null;
-
-    async function waitForIceGathering(pc) {
-      if (pc.iceGatheringState === "complete") return;
-      await new Promise((resolve) => {
-        const timeout = setTimeout(resolve, 2000);
-        pc.addEventListener("icegatheringstatechange", () => {
-          if (pc.iceGatheringState === "complete") {
-            clearTimeout(timeout);
-            resolve();
-          }
-        });
-      });
-    }
-
-    async function connect() {
-      connectBtn.disabled = true;
-      statusEl.textContent = "connecting";
-      if (pc) pc.close();
-
-      pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-      pc.ontrack = (event) => {
-        console.log("ontrack event:", event);
-        console.log("streams:", event.streams);
-        console.log("track:", event.track);
-        if (event.streams && event.streams[0]) {
-          console.log("Setting video srcObject to stream:", event.streams[0]);
-          video.srcObject = event.streams[0];
-        } else {
-          console.warn("No streams in track event, creating manual MediaStream");
-          const stream = new MediaStream([event.track]);
-          video.srcObject = stream;
-        }
-      };
-      pc.onconnectionstatechange = () => {
-        console.log("Connection state:", pc.connectionState);
-        statusEl.textContent = pc.connectionState;
-      };
-
-      const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: false });
-      await pc.setLocalDescription(offer);
-      await waitForIceGathering(pc);
-
-      const res = await fetch("/api/webrtc/offer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
-      });
-
-      if (!res.ok) {
-        throw new Error("signaling failed");
-      }
-
-      const answer = await res.json();
-      await pc.setRemoteDescription(answer);
-      statusEl.textContent = "connected";
-      connectBtn.disabled = false;
-    }
-
-    connectBtn.addEventListener("click", () => {
-      connect().catch((err) => {
-        statusEl.textContent = "error: " + err.message;
-        connectBtn.disabled = false;
-      });
-    });
-  </script>
 </body>
 </html>`;
 }
@@ -194,197 +100,94 @@ function sendHtml(res: ServerResponse, html: string): void {
   res.end(html);
 }
 
-function readJsonBody(req: IncomingMessage): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    req.on("end", () => {
-      try {
-        const body = Buffer.concat(chunks).toString("utf8");
-        resolve(body ? JSON.parse(body) : {});
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-async function waitForIceGatheringComplete(pc: InstanceType<typeof RTCPeerConnection>): Promise<void> {
-  if (pc.iceGatheringState === "complete") return;
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve();
-    }, 2000);
-    pc.addEventListener("icegatheringstatechange", () => {
-      if (pc.iceGatheringState === "complete") {
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-  });
-}
-
 function removeClient(id: string): void {
   const client = streamClients.get(id);
   if (!client) return;
   try {
-    client.pc.close();
-  } catch {
-    // no-op
-  }
-  try {
-    client.track.stop();
+    if (!client.res.writableEnded) {
+      client.res.end();
+    }
   } catch {
     // no-op
   }
   streamClients.delete(id);
   stats.activeClients = streamClients.size;
+  console.log(`[Stream] Client ${id} disconnected (${streamClients.size} active)`);
 }
 
-async function handleOfferRequest(res: ServerResponse, body: any): Promise<void> {
-  const offerSdp = body?.sdp;
-  const offerType = body?.type;
-  if (!offerSdp || offerType !== "offer") {
-    sendJson(res, 400, { error: "invalid_offer" });
-    return;
-  }
+async function handleMjpegStream(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const clientId = `mjpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
-  const clientId = randomUUID();
-  const pc = new RTCPeerConnection({
-    iceServers: config.streaming.stunServers.map((urls) => ({ urls })),
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "Connection": "close",
   });
-
-  pc.addEventListener("connectionstatechange", () => {
-    const state = pc.connectionState;
-    if (state === "failed" || state === "disconnected" || state === "closed") {
-      removeClient(clientId);
-    }
-  });
-
-  // Set remote description FIRST to see client's transceivers
-  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
-
-  // Create video source and track
-  const source = new RTCVideoSource();
-  const track = source.createTrack();
-
-  // Send an initial black frame to activate the track
-  const blackFrame = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2), 0);
-  source.onFrame({
-    width: GB_WIDTH,
-    height: GB_HEIGHT,
-    data: blackFrame,
-  });
-
-  // Get the transceiver created by the client's offer
-  const transceivers = pc.getTransceivers();
-  console.log(`[Stream] Transceivers count: ${transceivers.length}`);
-
-  let transceiver = transceivers.find((t: any) => t.receiver && t.receiver.track && t.receiver.track.kind === "video");
-
-  if (transceiver) {
-    // Replace the track on the existing transceiver
-    console.log(`[Stream] Found video transceiver, replacing track (current direction: ${transceiver.direction})`);
-    await transceiver.sender.replaceTrack(track);
-    transceiver.direction = "sendonly";
-  } else {
-    // No transceiver, add one (shouldn't happen with offerToReceiveVideo)
-    console.log(`[Stream] No video transceiver found, adding new one`);
-    transceiver = pc.addTransceiver(track, { direction: "sendonly" });
-  }
-
-  const stream = new MediaStream([track]);
-
-  // Create answer
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-
-  console.log(`[Stream] Answer SDP has video:`, answer.sdp?.includes("m=video"));
-  console.log(`[Stream] Answer SDP preview:`, answer.sdp?.substring(0, 400));
-  await waitForIceGatheringComplete(pc);
 
   streamClients.set(clientId, {
     id: clientId,
-    pc,
-    source,
-    track,
-    stream,
+    res,
     connectedAtMs: Date.now(),
   });
   stats.activeClients = streamClients.size;
 
-  console.log(`[Stream] Client ${clientId} connected (${streamClients.size} active)`);
+  console.log(`[Stream] MJPEG client ${clientId} connected (${streamClients.size} active)`);
 
-  const local = pc.localDescription;
-  sendJson(res, 200, { type: local.type, sdp: local.sdp });
+  req.on("close", () => {
+    removeClient(clientId);
+  });
+
+  req.on("error", () => {
+    removeClient(clientId);
+  });
 }
 
-async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const method = req.method ?? "GET";
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-
-  if (method === "GET" && url.pathname === "/") {
-    sendHtml(res, buildViewerHtml());
-    return;
-  }
-
-  if (method === "GET" && url.pathname === "/healthz") {
-    sendJson(res, 200, {
-      status: "ok",
-      stream: {
-        ...stats,
-        targetFps: requestedFps,
-      },
-    });
-    return;
-  }
-
-  if (method === "GET" && url.pathname === "/metrics") {
-    sendJson(res, 200, {
-      stream: {
-        ...stats,
-        targetFps: requestedFps,
-      },
-    });
-    return;
-  }
-
-  if (method === "POST" && url.pathname === "/api/webrtc/offer") {
-    try {
-      const body = await readJsonBody(req);
-      await handleOfferRequest(res, body);
-    } catch {
-      sendJson(res, 400, { error: "invalid_json" });
-    }
-    return;
-  }
-
-  sendJson(res, 404, { error: "not_found" });
-}
-
-function pushFrameToClients(rgba: Buffer): void {
+async function pushFrameToClients(rgba: Buffer): Promise<void> {
   if (streamClients.size === 0) return;
+
   const encodeStart = Date.now();
-  const { data } = rgbaToI420(rgba, GB_WIDTH, GB_HEIGHT, i420Buffer);
-  for (const client of streamClients.values()) {
-    try {
-      client.source.onFrame({
+
+  try {
+    // Convert RGBA to JPEG using sharp
+    const jpeg = await sharp(rgba, {
+      raw: {
         width: GB_WIDTH,
         height: GB_HEIGHT,
-        data,
-      });
-    } catch (err) {
-      console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
-      removeClient(client.id);
+        channels: 4,
+      },
+    })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    // Send to all connected clients
+    for (const client of streamClients.values()) {
+      try {
+        if (!client.res.writable || client.res.writableEnded) {
+          removeClient(client.id);
+          continue;
+        }
+
+        client.res.write(`--frame\r\n`);
+        client.res.write(`Content-Type: image/jpeg\r\n`);
+        client.res.write(`Content-Length: ${jpeg.length}\r\n`);
+        client.res.write(`\r\n`);
+        client.res.write(jpeg);
+        client.res.write(`\r\n`);
+      } catch (err) {
+        console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
+        removeClient(client.id);
+      }
     }
+
+    stats.encodedFrames += 1;
+    const elapsed = Date.now() - encodeStart;
+    stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.9 + elapsed * 0.1;
+    stats.lastSentFrameAtMs = Date.now();
+  } catch (err) {
+    console.error("[Stream] Frame encoding error:", (err as Error)?.message ?? err);
   }
-  stats.encodedFrames += 1;
-  const elapsed = Date.now() - encodeStart;
-  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : (stats.avgEncodeMs * 0.9) + (elapsed * 0.1);
-  stats.lastSentFrameAtMs = Date.now();
 }
 
 function startEncodeLoop(): void {
@@ -396,7 +199,7 @@ function startEncodeLoop(): void {
       stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
     }
     stats.lastProducedSeq = frame.meta.seq;
-    pushFrameToClients(sourceFrameCopy);
+    pushFrameToClients(sourceFrameCopy).catch(() => {});
   };
 
   const schedule = () => {
@@ -432,9 +235,46 @@ function maybeAutoTune(): void {
   tuneDroppedStart = stats.droppedFrames;
 }
 
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const method = req.method ?? "GET";
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  if (method === "GET" && url.pathname === "/") {
+    sendHtml(res, buildViewerHtml());
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/stream.mjpeg") {
+    await handleMjpegStream(req, res);
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/healthz") {
+    sendJson(res, 200, {
+      status: "ok",
+      stream: {
+        ...stats,
+        targetFps: requestedFps,
+      },
+    });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/metrics") {
+    sendJson(res, 200, {
+      stream: {
+        ...stats,
+        targetFps: requestedFps,
+      },
+    });
+    return;
+  }
+
+  sendJson(res, 404, { error: "not_found" });
+}
+
 export async function startStream(): Promise<void> {
   if (httpServer) return;
-  ensureWebRtcRuntime();
 
   unsubscribeFrames = subscribeFrames((meta) => {
     latestObservedFrame = meta;
@@ -456,35 +296,9 @@ export async function startStream(): Promise<void> {
     });
   });
 
-  console.log(`[Stream] Browser viewer ready at ${streamBaseUrl()}/`);
+  console.log(`[Stream] MJPEG viewer ready at ${streamBaseUrl()}/`);
   console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
-  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} source | encode ${requestedFps}fps (min ${minFps}) | emulator ${STREAM_FPS}fps`);
-}
-
-function ensureWebRtcRuntime(): void {
-  if (RTCPeerConnection && RTCSessionDescription && RTCVideoSource && MediaStream) return;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const wrtc = require("@roamhq/wrtc");
-    RTCPeerConnection = wrtc.RTCPeerConnection;
-    RTCSessionDescription = wrtc.RTCSessionDescription;
-    RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
-    MediaStream = wrtc.MediaStream;
-  } catch {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const wrtc = require("wrtc");
-      RTCPeerConnection = wrtc.RTCPeerConnection;
-      RTCSessionDescription = wrtc.RTCSessionDescription;
-      RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
-      MediaStream = wrtc.MediaStream;
-    } catch {
-      throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
-    }
-  }
-  if (!RTCPeerConnection || !RTCSessionDescription || !RTCVideoSource || !MediaStream) {
-    throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
-  }
+  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} source | encode ${requestedFps}fps (min ${minFps})`);
 }
 
 export function stopStream(): void {
