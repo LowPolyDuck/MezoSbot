@@ -1,10 +1,12 @@
 /**
- * Browser stream transport: Canvas + WebSocket
- * Fast, low-latency streaming using raw frame data and HTML5 Canvas.
+ * Browser stream transport: Canvas + WebSocket with zlib compression
+ * Fast, low-latency streaming using compressed frame data and HTML5 Canvas.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
+import { deflate } from "node:zlib";
+import { promisify } from "node:util";
 import {
   getLatestFrameRef,
   subscribeFrames,
@@ -13,6 +15,8 @@ import {
   type FrameMeta,
 } from "./emulator.js";
 import { config } from "./config.js";
+
+const deflateAsync = promisify(deflate);
 
 interface StreamClient {
   id: string;
@@ -30,6 +34,8 @@ interface StreamStats {
   lastSentFrameAtMs: number;
   lastProducedSeq: number;
   activeClients: number;
+  avgCompressRatio: number;
+  avgCompressedSizeBytes: number;
 }
 
 const streamClients = new Map<string, StreamClient>();
@@ -49,6 +55,8 @@ const stats: StreamStats = {
   lastSentFrameAtMs: 0,
   lastProducedSeq: 0,
   activeClients: 0,
+  avgCompressRatio: 0,
+  avgCompressedSizeBytes: 0,
 };
 
 function streamBaseUrl(): string {
@@ -78,7 +86,7 @@ function buildViewerHtml(): string {
 <body>
   <div class="wrap">
     <h1>MezoSbot Browser Stream</h1>
-    <p>Low-latency canvas streaming.</p>
+    <p>Low-latency compressed streaming.</p>
     <canvas id="canvas" width="${GB_WIDTH}" height="${GB_HEIGHT}"></canvas>
     <div class="status" id="status">Connecting...</div>
   </div>
@@ -95,6 +103,31 @@ function buildViewerHtml(): string {
     let frameCount = 0;
     let lastFpsUpdate = Date.now();
 
+    // Decompress frame using browser's native DecompressionStream
+    async function decompressFrame(compressed) {
+      const ds = new DecompressionStream('deflate');
+      const writer = ds.writable.getWriter();
+      writer.write(new Uint8Array(compressed));
+      writer.close();
+
+      const chunks = [];
+      const reader = ds.readable.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+
+      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+      const result = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return result.buffer;
+    }
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(protocol + '//' + window.location.host + '/stream');
@@ -108,10 +141,11 @@ function buildViewerHtml(): string {
         lastFpsUpdate = Date.now();
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         if (event.data instanceof ArrayBuffer) {
-          // Render every frame immediately
-          const rgba = new Uint8ClampedArray(event.data);
+          // Decompress and render frame
+          const decompressed = await decompressFrame(event.data);
+          const rgba = new Uint8ClampedArray(decompressed);
           const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
           ctx.putImageData(imageData, 0, 0);
 
@@ -171,8 +205,14 @@ function removeClient(id: string): void {
   console.log(`[Stream] Client ${id} disconnected (${streamClients.size} active)`);
 }
 
-function pushFrameToClients(rgba: Buffer): void {
+async function pushFrameToClients(rgba: Buffer): Promise<void> {
   if (streamClients.size === 0) return;
+
+  // Compress frame once for all clients
+  const compressed = await deflateAsync(rgba);
+  const compressRatio = rgba.length / compressed.length;
+  stats.avgCompressRatio = stats.avgCompressRatio === 0 ? compressRatio : stats.avgCompressRatio * 0.9 + compressRatio * 0.1;
+  stats.avgCompressedSizeBytes = stats.avgCompressedSizeBytes === 0 ? compressed.length : stats.avgCompressedSizeBytes * 0.9 + compressed.length * 0.1;
 
   const deadClients: string[] = [];
   const MAX_BUFFER_SIZE = 2 * 1024 * 1024; // 2MB backpressure limit per client
@@ -190,7 +230,7 @@ function pushFrameToClients(rgba: Buffer): void {
       continue;
     }
 
-    client.ws.send(rgba, { binary: true }, (err) => {
+    client.ws.send(compressed, { binary: true }, (err) => {
       if (err) deadClients.push(client.id);
     });
   }
@@ -248,7 +288,9 @@ export async function startStream(): Promise<void> {
     // Send frame immediately as emulator produces it
     const ref = getLatestFrameRef();
     if (ref) {
-      pushFrameToClients(ref.frame);
+      pushFrameToClients(ref.frame).catch((err) => {
+        console.error("[Stream] Compression error:", (err as Error)?.message ?? err);
+      });
     }
   });
 
@@ -296,7 +338,7 @@ export async function startStream(): Promise<void> {
 
   console.log(`[Stream] Canvas+WebSocket viewer ready at ${streamBaseUrl()}/`);
   console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
-  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} @ ${targetFps}fps`);
+  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} @ ${targetFps}fps with zlib compression`);
 }
 
 export function stopStream(): void {
