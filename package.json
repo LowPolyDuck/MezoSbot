@@ -19,6 +19,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@koush/wrtc": "^0.5.3",
     "@roamhq/wrtc": "^0.9.1",
     "@supabase/supabase-js": "^2.95.3",
     "discord.js": "^14.16.3",
