@@ -99,12 +99,12 @@ function buildViewerHtml(): string {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       signalWs = new WebSocket(protocol + '//' + window.location.host + '/signal');
 
-      signalWs.onopen = async () => {
-        status.textContent = 'Signaling connected, setting up WebRTC...';
+      signalWs.onopen = () => {
+        status.textContent = 'Signaling connected, waiting for offer...';
 
         // Create peer connection
         pc = new RTCPeerConnection({
-          iceServers: [{ urls: '${config.streaming.stunServers.join("','")}' }]
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
         // Handle ICE candidates
@@ -155,18 +155,17 @@ function buildViewerHtml(): string {
             }
           };
         };
-
-        // Create offer
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        signalWs.send(JSON.stringify({ type: 'offer', sdp: offer }));
       };
 
       signalWs.onmessage = async (event) => {
         const msg = JSON.parse(event.data);
 
-        if (msg.type === 'answer') {
+        if (msg.type === 'offer') {
+          // Receive offer from server, create answer
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          signalWs.send(JSON.stringify({ type: 'answer', sdp: answer }));
         } else if (msg.type === 'ice') {
           await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
         }
@@ -346,8 +345,8 @@ export async function startStream(): Promise<void> {
       });
 
       const dataChannel = pc.createDataChannel("frames", {
-        ordered: false, // Allow out-of-order for lower latency
-        maxRetransmits: 0, // Don't retransmit - just drop old frames
+        ordered: false,
+        maxRetransmits: 0,
       });
 
       webrtcClients.set(clientId, {
@@ -371,11 +370,8 @@ export async function startStream(): Promise<void> {
         try {
           const msg = JSON.parse(data.toString());
 
-          if (msg.type === "offer") {
+          if (msg.type === "answer") {
             await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            ws.send(JSON.stringify({ type: "answer", sdp: answer }));
           } else if (msg.type === "ice") {
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
@@ -391,6 +387,16 @@ export async function startStream(): Promise<void> {
       ws.on("error", () => {
         removeClient(clientId);
       });
+
+      // Server creates offer (because server creates DataChannel)
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: "offer", sdp: offer }));
+      } catch (err) {
+        console.error("[WebRTC] Failed to create offer:", (err as Error)?.message ?? err);
+        removeClient(clientId);
+      }
     });
 
     httpServer.listen(config.streaming.port, "0.0.0.0", () => {
