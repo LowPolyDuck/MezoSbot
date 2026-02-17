@@ -264,16 +264,17 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     }
   });
 
-  // Create video source and track FIRST
+  // Create video source and track
   const source = new RTCVideoSource();
   const track = source.createTrack();
 
-  // Add track to peer connection BEFORE setting remote description
-  // This ensures the track is available when creating the answer
-  const stream = new MediaStream();
-  pc.addTrack(track, stream);
+  // Use addTransceiver to explicitly control negotiation
+  const transceiver = pc.addTransceiver(track, {
+    direction: "sendonly",
+    streams: [new MediaStream([track])],
+  });
 
-  console.log(`[Stream] Added track to peer connection (kind: ${track.kind})`);
+  console.log(`[Stream] Added transceiver (direction: ${transceiver.direction})`);
 
   // Set remote description
   await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
@@ -282,7 +283,7 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
-  console.log(`[Stream] Answer SDP includes video:`, answer.sdp?.includes("m=video"));
+  console.log(`[Stream] Answer SDP:`, answer.sdp?.substring(0, 300));
 
   // Send an initial black frame to activate the track
   const blackFrame = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2), 0);
@@ -291,6 +292,8 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     height: GB_HEIGHT,
     data: blackFrame,
   });
+
+  const stream = new MediaStream([track]);
   await waitForIceGatheringComplete(pc);
 
   streamClients.set(clientId, {
