@@ -39,6 +39,8 @@ let encodeLoop: NodeJS.Timeout | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
 const targetFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
+let lastEncodeTime = Date.now();
+let skippedFrameCount = 0;
 
 const stats: StreamStats = {
   producedFrames: 0,
@@ -177,12 +179,19 @@ function pushFrameToClients(rgba: Buffer): void {
 
   const encodeStart = Date.now();
   const deadClients: string[] = [];
+  const MAX_BUFFER_SIZE = 2 * 1024 * 1024; // 2MB backpressure limit per client
 
-  // Send to all clients in parallel
+  // Send to all clients in parallel with backpressure handling
   for (const client of streamClients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) {
       deadClients.push(client.id);
       continue;
+    }
+
+    // Backpressure check: skip frame if client's send buffer is backed up
+    if (client.ws.bufferedAmount > MAX_BUFFER_SIZE) {
+      stats.droppedFrames++;
+      continue; // Skip this frame for this slow client
     }
 
     client.ws.send(rgba, { binary: true }, (err) => {
@@ -204,12 +213,28 @@ function startEncodeLoop(): void {
   const intervalMs = Math.floor(1000 / targetFps);
 
   encodeLoop = setInterval(() => {
+    const now = Date.now();
+    const delta = now - lastEncodeTime;
+
+    // Frame skip detection: warn if we're falling behind
+    if (delta > intervalMs * 1.5) {
+      skippedFrameCount++;
+      if (skippedFrameCount % 10 === 0) {
+        console.warn(`[Stream] Falling behind: ${delta}ms since last frame (target ${intervalMs}ms) - ${skippedFrameCount} skips total`);
+      }
+    }
+
+    lastEncodeTime = now;
+
     if (!latestObservedFrame) return;
 
     const ref = getLatestFrameRef();
     if (!ref) return;
 
-    pushFrameToClients(ref.frame);
+    // Defer send to next event loop tick (non-blocking)
+    process.nextTick(() => {
+      pushFrameToClients(ref.frame);
+    });
   }, intervalMs);
 }
 
