@@ -264,12 +264,25 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     }
   });
 
-  // Set remote description to see what the client wants
-  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
-
-  // Create video source and track
+  // Create video source and track FIRST
   const source = new RTCVideoSource();
   const track = source.createTrack();
+
+  // Add track to peer connection BEFORE setting remote description
+  // This ensures the track is available when creating the answer
+  const stream = new MediaStream();
+  pc.addTrack(track, stream);
+
+  console.log(`[Stream] Added track to peer connection (kind: ${track.kind})`);
+
+  // Set remote description
+  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
+
+  // Create answer
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  console.log(`[Stream] Answer SDP includes video:`, answer.sdp?.includes("m=video"));
 
   // Send an initial black frame to activate the track
   const blackFrame = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2), 0);
@@ -278,28 +291,6 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     height: GB_HEIGHT,
     data: blackFrame,
   });
-
-  // Check transceivers and add track
-  console.log(`[Stream] Transceivers:`, pc.getTransceivers().length);
-  const transceivers = pc.getTransceivers();
-  const videoTransceiver = transceivers.find((t: any) => t.receiver?.track?.kind === "video");
-
-  if (videoTransceiver) {
-    console.log(`[Stream] Found existing video transceiver, direction: ${videoTransceiver.direction}`);
-    await videoTransceiver.sender.replaceTrack(track);
-    videoTransceiver.direction = "sendonly";
-  } else {
-    console.log(`[Stream] No existing transceiver, adding track`);
-    pc.addTrack(track);
-  }
-
-  const stream = new MediaStream([track]);
-
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-
-  console.log(`[Stream] Answer created, video transceivers:`,
-    pc.getTransceivers().filter((t: any) => t.receiver?.track?.kind === "video").length);
   await waitForIceGatheringComplete(pc);
 
   streamClients.set(clientId, {
