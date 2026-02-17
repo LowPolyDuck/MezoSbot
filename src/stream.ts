@@ -35,18 +35,16 @@ interface StreamStats {
 const streamClients = new Map<string, StreamClient>();
 let httpServer: Server | null = null;
 let wss: WebSocketServer | null = null;
+let encodeLoop: NodeJS.Timeout | null = null;
 let unsubscribeFrames: (() => void) | null = null;
-let lastPushedSeq = 0;
-const requestedFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
-const minFps = Math.max(1, Math.min(requestedFps, config.streaming.minFps));
-let currentTargetFps = requestedFps;
-let lastFramePushMs = 0;
+let latestObservedFrame: FrameMeta | null = null;
+const targetFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
 
 const stats: StreamStats = {
   producedFrames: 0,
   encodedFrames: 0,
   droppedFrames: 0,
-  currentEncodeFps: requestedFps,
+  currentEncodeFps: targetFps,
   avgEncodeMs: 0,
   lastSourceFrameAtMs: 0,
   lastSentFrameAtMs: 0,
@@ -97,32 +95,6 @@ function buildViewerHtml(): string {
     let reconnectTimer;
     let frameCount = 0;
     let lastFpsUpdate = Date.now();
-    let lastFrameTime = 0;
-    let pendingFrame = null;
-    let rendering = false;
-
-    // Smooth frame rendering using requestAnimationFrame
-    function renderLoop() {
-      if (pendingFrame) {
-        ctx.putImageData(pendingFrame, 0, 0);
-        pendingFrame = null;
-
-        frameCount++;
-        const now = Date.now();
-        lastFrameTime = now;
-
-        if (now - lastFpsUpdate >= 1000) {
-          const fps = frameCount;
-          status.textContent = 'Connected - ' + fps + ' fps';
-          frameCount = 0;
-          lastFpsUpdate = now;
-        }
-      }
-
-      if (rendering) {
-        requestAnimationFrame(renderLoop);
-      }
-    }
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -135,15 +107,23 @@ function buildViewerHtml(): string {
         status.style.color = '#10b981';
         frameCount = 0;
         lastFpsUpdate = Date.now();
-        rendering = true;
-        requestAnimationFrame(renderLoop);
       };
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          // Queue frame for rendering on next animation frame
+          // Render every frame immediately
           const rgba = new Uint8ClampedArray(event.data);
-          pendingFrame = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
+          const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
+          ctx.putImageData(imageData, 0, 0);
+
+          // Update FPS counter
+          frameCount++;
+          const now = Date.now();
+          if (now - lastFpsUpdate >= 1000) {
+            status.textContent = 'Connected - ' + frameCount + ' fps';
+            frameCount = 0;
+            lastFpsUpdate = now;
+          }
         }
       };
 
@@ -153,11 +133,9 @@ function buildViewerHtml(): string {
       };
 
       ws.onclose = () => {
-        rendering = false;
         status.textContent = 'Disconnected - reconnecting...';
         status.style.color = '#f59e0b';
 
-        // Reconnect after 2 seconds
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 2000);
       };
@@ -194,59 +172,46 @@ function removeClient(id: string): void {
   console.log(`[Stream] Client ${id} disconnected (${streamClients.size} active)`);
 }
 
-function pushFrameToClients(rgba: Buffer, seq: number): void {
+function pushFrameToClients(rgba: Buffer): void {
   if (streamClients.size === 0) return;
 
-  // FPS throttling - skip frames if we're exceeding target FPS
-  const now = Date.now();
-  const minFrameInterval = 1000 / currentTargetFps;
-  if (now - lastFramePushMs < minFrameInterval) {
-    return; // Skip this frame to maintain target FPS
-  }
-  lastFramePushMs = now;
-
-  const encodeStart = now;
+  const encodeStart = Date.now();
   const deadClients: string[] = [];
-  const maxBuffered = 4 * 1024 * 1024; // 4MB buffer - handle 60fps better
 
-  // Track dropped frames
-  if (lastPushedSeq > 0 && seq > lastPushedSeq + 1) {
-    stats.droppedFrames += seq - lastPushedSeq - 1;
-  }
-  lastPushedSeq = seq;
-
-  // Send raw RGBA data to all connected clients in parallel
+  // Send to all clients in parallel
   for (const client of streamClients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) {
       deadClients.push(client.id);
       continue;
     }
 
-    // Skip send if client's buffer is backed up
-    if (client.ws.bufferedAmount > maxBuffered) {
-      continue; // Client will catch up
-    }
-
-    // Non-blocking send with error handling via callback
     client.ws.send(rgba, { binary: true }, (err) => {
-      if (err) {
-        deadClients.push(client.id);
-      }
+      if (err) deadClients.push(client.id);
     });
   }
 
-  // Clean up dead clients
   for (const id of deadClients) {
     removeClient(id);
   }
 
   stats.encodedFrames += 1;
   const elapsed = Date.now() - encodeStart;
-  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.95 + elapsed * 0.05;
+  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.9 + elapsed * 0.1;
   stats.lastSentFrameAtMs = Date.now();
 }
 
-// Direct frame push - no separate encode loop, eliminates timing jitter
+function startEncodeLoop(): void {
+  const intervalMs = Math.floor(1000 / targetFps);
+
+  encodeLoop = setInterval(() => {
+    if (!latestObservedFrame) return;
+
+    const ref = getLatestFrameRef();
+    if (!ref) return;
+
+    pushFrameToClients(ref.frame);
+  }, intervalMs);
+}
 
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const method = req.method ?? "GET";
@@ -262,7 +227,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
       status: "ok",
       stream: {
         ...stats,
-        targetFps: requestedFps,
+        targetFps,
       },
     });
     return;
@@ -272,7 +237,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
     sendJson(res, 200, {
       stream: {
         ...stats,
-        targetFps: requestedFps,
+        targetFps,
       },
     });
     return;
@@ -284,18 +249,15 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 export async function startStream(): Promise<void> {
   if (httpServer) return;
 
-  // Direct frame push - subscribe to emulator and push immediately (zero timing jitter)
+  // Subscribe to track emulator frames
   unsubscribeFrames = subscribeFrames((meta) => {
+    latestObservedFrame = meta;
     stats.producedFrames += 1;
     stats.lastSourceFrameAtMs = meta.capturedAtMs;
-    stats.lastProducedSeq = meta.seq;
-
-    // Get frame reference (zero-copy - ring buffers are safe)
-    const ref = getLatestFrameRef();
-    if (ref) {
-      pushFrameToClients(ref.frame, ref.meta.seq);
-    }
   });
+
+  // Start sampling loop at target FPS
+  startEncodeLoop();
 
   await new Promise<void>((resolve) => {
     httpServer = createServer((req, res) => {
@@ -341,10 +303,14 @@ export async function startStream(): Promise<void> {
 
   console.log(`[Stream] Canvas+WebSocket viewer ready at ${streamBaseUrl()}/`);
   console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
-  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} source | encode ${requestedFps}fps (min ${minFps})`);
+  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} @ ${targetFps}fps`);
 }
 
 export function stopStream(): void {
+  if (encodeLoop) {
+    clearInterval(encodeLoop);
+    encodeLoop = null;
+  }
   if (unsubscribeFrames) {
     unsubscribeFrames();
     unsubscribeFrames = null;
