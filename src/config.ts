@@ -44,6 +44,18 @@ export const config = {
     /** Democracy round duration in ms — votes collected, button with highest total sats wins */
     roundMs: parseInt(optional("GB_ROUND_MS", "500"), 10),
   },
+  streaming: {
+    port: parseInt(optional("STREAM_PORT", optional("PORT", "8787")), 10),
+    targetFps: parseInt(optional("STREAM_TARGET_FPS", "30"), 10),
+    minFps: parseInt(optional("STREAM_MIN_FPS", "20"), 10),
+    maxFps: parseInt(optional("STREAM_MAX_FPS", "60"), 10),
+    viewerScale: parseInt(optional("STREAM_VIEWER_SCALE", "4"), 10),
+    autoTune: process.env.STREAM_AUTO_TUNE !== "0" && process.env.STREAM_AUTO_TUNE !== "false",
+    stunServers: (process.env.STUN_SERVERS ?? "stun:stun.l.google.com:19302")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  },
 };
 
 /**

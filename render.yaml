@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: mezosbot
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        generateValue: true
+      - key: STREAM_PORT
+        sync: false
+      - key: STREAM_TARGET_FPS
+        value: 30
+      - key: STREAM_MIN_FPS
+        value: 20
+      - key: STREAM_MAX_FPS
+        value: 60
+      - key: STREAM_AUTO_TUNE
+        value: "true"

@@ -4,10 +4,9 @@
  * Clean and fast:
  * - Single 60fps timer: emulation + round resolution + frame output.
  * - Pre-allocated frame buffer — zero GC in the hot loop.
- * - Frames go straight to ffplay for local display. No encoding overhead.
+ * - Frames are published through a latest-frame API for stream transports.
  */
 import fs from "node:fs";
-import { PassThrough } from "node:stream";
 import { config } from "./config.js";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -24,6 +23,14 @@ const TICK_MS = 1000 / STREAM_FPS;
 const FRAMES_PER_TICK = BASE_SPEED;
 const HOLD_FRAMES = parseInt(process.env.GB_HOLD_FRAMES ?? "16", 10);
 const FRAME_BYTES = GB_WIDTH * GB_HEIGHT * 4;
+
+export interface FrameMeta {
+  width: number;
+  height: number;
+  bytes: number;
+  seq: number;
+  capturedAtMs: number;
+}
 
 export const BUTTONS = ["A", "B", "UP", "DOWN", "LEFT", "RIGHT", "START", "SELECT"] as const;
 export type GBButton = (typeof BUTTONS)[number];
@@ -70,11 +77,13 @@ let activeButton: GBButton | null = null;
 let activeHoldRemaining = 0;
 let onRoundResolved: ((result: RoundResult) => void) | null = null;
 
-// Pre-allocated — never alloc in the hot loop
-const frameBuf = Buffer.alloc(FRAME_BYTES);
-
-// Frames go straight to ffplay stdin via this pipe
-export const frameStream = new PassThrough({ highWaterMark: FRAME_BYTES * 4 });
+// Pre-allocated frame ring buffers — avoid allocations in the hot loop.
+const frameRing = [Buffer.alloc(FRAME_BYTES), Buffer.alloc(FRAME_BYTES)];
+let frameRingIdx = 0;
+let latestFrame: Buffer | null = null;
+let latestMeta: FrameMeta | null = null;
+let frameSeq = 0;
+const frameSubscribers = new Set<(meta: FrameMeta) => void>();
 
 // Round timing tracked inline
 let roundMs = 500;
@@ -86,6 +95,37 @@ export function isRunning(): boolean { return running; }
 
 export function onRound(cb: (result: RoundResult) => void): void {
   onRoundResolved = cb;
+}
+
+/**
+ * Subscribe to frame-ready notifications.
+ * Consumers should call `getLatestFrameCopy` if they need owned memory.
+ */
+export function subscribeFrames(cb: (meta: FrameMeta) => void): () => void {
+  frameSubscribers.add(cb);
+  return () => {
+    frameSubscribers.delete(cb);
+  };
+}
+
+/**
+ * Returns a reference to the latest frame buffer.
+ * The reference is valid until the next frame publication.
+ */
+export function getLatestFrameRef(): { frame: Buffer; meta: FrameMeta } | null {
+  if (!latestFrame || !latestMeta) return null;
+  return { frame: latestFrame, meta: latestMeta };
+}
+
+/**
+ * Copies the latest frame into caller-provided memory.
+ * This is the safe option for async consumers.
+ */
+export function getLatestFrameCopy(target?: Buffer): { frame: Buffer; meta: FrameMeta } | null {
+  if (!latestFrame || !latestMeta) return null;
+  const out = target && target.length >= FRAME_BYTES ? target : Buffer.allocUnsafe(FRAME_BYTES);
+  latestFrame.copy(out, 0, 0, FRAME_BYTES);
+  return { frame: out, meta: latestMeta };
 }
 
 export function startEmulator(romPath: string): void {
@@ -105,6 +145,8 @@ export function stopEmulator(): void {
   if (loopHandle) clearInterval(loopHandle);
   loopHandle = null;
   bidPool.clear();
+  latestFrame = null;
+  latestMeta = null;
 }
 
 /* ── Single tick — emulation + rounds + frame output ───────────────── */
@@ -129,10 +171,33 @@ function tick(): void {
     screen = gb.doFrame();
   }
 
-  // Write frame — ffplay reads raw RGBA, no encoding needed
+  // Publish latest frame. Slow consumers can drop old frames safely.
   if (screen && screen.length >= FRAME_BYTES) {
-    for (let i = 0; i < FRAME_BYTES; i++) frameBuf[i] = screen[i] & 0xff;
-    frameStream.write(frameBuf);
+    frameRingIdx = frameRingIdx ^ 1;
+    const slot = frameRing[frameRingIdx];
+    copyFrameIntoSlot(screen, slot);
+    frameSeq += 1;
+    latestFrame = slot;
+    latestMeta = {
+      width: GB_WIDTH,
+      height: GB_HEIGHT,
+      bytes: FRAME_BYTES,
+      seq: frameSeq,
+      capturedAtMs: Date.now(),
+    };
+    for (const cb of frameSubscribers) {
+      cb(latestMeta);
+    }
+  }
+}
+
+function copyFrameIntoSlot(screen: any, slot: Buffer): void {
+  if (typeof screen.subarray === "function") {
+    slot.set(screen.subarray(0, FRAME_BYTES), 0);
+    return;
+  }
+  for (let i = 0; i < FRAME_BYTES; i++) {
+    slot[i] = screen[i] & 0xff;
   }
 }
 

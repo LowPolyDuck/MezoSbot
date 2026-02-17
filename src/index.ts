@@ -288,13 +288,13 @@ async function main() {
 
   await client.login(config.discord.token);
 
-  // ── Game Boy emulator + local display ──
+  // ── Game Boy emulator + browser stream ──
   const { romPath } = config.gameboy;
   if (romPath) {
     try {
       startEmulator(romPath);
       setupGameBoyCallbacks();
-      await startStream(); // opens an ffplay window — screen share it yourself
+      await startStream();
     } catch (err) {
       console.error("[GameBoy] Failed to start:", (err as Error)?.message ?? err);
     }
