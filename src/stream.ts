@@ -21,12 +21,14 @@ import { rgbaToI420 } from "./streaming/rgbaToI420.js";
 let RTCPeerConnection: any;
 let RTCSessionDescription: any;
 let RTCVideoSource: any;
+let MediaStream: any;
 
 interface StreamClient {
   id: string;
   pc: InstanceType<typeof RTCPeerConnection>;
   source: any;
   track: any;
+  stream: any;
   connectedAtMs: number;
 }
 
@@ -256,7 +258,9 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
 
   const source = new RTCVideoSource();
   const track = source.createTrack();
-  pc.addTrack(track);
+  const stream = new MediaStream();
+  stream.addTrack(track);
+  pc.addTrack(track, stream);
 
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
@@ -267,6 +271,7 @@ async function handleOfferRequest(res: ServerResponse, body: any): Promise<void>
     pc,
     source,
     track,
+    stream,
     connectedAtMs: Date.now(),
   });
   stats.activeClients = streamClients.size;
@@ -417,13 +422,14 @@ export async function startStream(): Promise<void> {
 }
 
 function ensureWebRtcRuntime(): void {
-  if (RTCPeerConnection && RTCSessionDescription && RTCVideoSource) return;
+  if (RTCPeerConnection && RTCSessionDescription && RTCVideoSource && MediaStream) return;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const wrtc = require("@roamhq/wrtc");
     RTCPeerConnection = wrtc.RTCPeerConnection;
     RTCSessionDescription = wrtc.RTCSessionDescription;
     RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
+    MediaStream = wrtc.MediaStream;
   } catch {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -431,11 +437,12 @@ function ensureWebRtcRuntime(): void {
       RTCPeerConnection = wrtc.RTCPeerConnection;
       RTCSessionDescription = wrtc.RTCSessionDescription;
       RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
+      MediaStream = wrtc.MediaStream;
     } catch {
       throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
     }
   }
-  if (!RTCPeerConnection || !RTCSessionDescription || !RTCVideoSource) {
+  if (!RTCPeerConnection || !RTCSessionDescription || !RTCVideoSource || !MediaStream) {
     throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
   }
 }
