@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { URL } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  getLatestFrameRef,
+  getLatestFrameCopy,
   subscribeFrames,
   GB_WIDTH,
   GB_HEIGHT,
@@ -38,6 +38,7 @@ let wss: WebSocketServer | null = null;
 let encodeLoop: ReturnType<typeof setTimeout> | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
+let sourceFrameCopy = Buffer.alloc(GB_WIDTH * GB_HEIGHT * 4);
 const requestedFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
 const minFps = Math.max(1, Math.min(requestedFps, config.streaming.minFps));
 let currentEncodeFps = requestedFps;
@@ -192,7 +193,7 @@ function pushFrameToClients(rgba: Buffer): void {
 
   const encodeStart = Date.now();
   const deadClients: string[] = [];
-  const maxBuffered = 1024 * 1024; // 1MB buffer limit per client
+  const maxBuffered = 512 * 1024; // 512KB buffer limit per client - fail fast if client is slow
 
   // Send raw RGBA data to all connected clients in parallel
   for (const client of streamClients.values()) {
@@ -203,12 +204,14 @@ function pushFrameToClients(rgba: Buffer): void {
 
     // Skip send if client's buffer is backed up (backpressure handling)
     if (client.ws.bufferedAmount > maxBuffered) {
+      console.warn(`[Stream] Client ${client.id} buffer full (${client.ws.bufferedAmount} bytes), skipping frame`);
       continue;
     }
 
     // Non-blocking send with error handling via callback
     client.ws.send(rgba, { binary: true }, (err) => {
       if (err) {
+        console.error(`[Stream] Send error to ${client.id}:`, err.message);
         deadClients.push(client.id);
       }
     });
@@ -227,27 +230,24 @@ function pushFrameToClients(rgba: Buffer): void {
 
 function startEncodeLoop(): void {
   const intervalMs = Math.round(1000 / Math.max(1, currentEncodeFps));
-  let frameCount = 0;
 
   encodeLoop = setInterval(() => {
     if (!latestObservedFrame) return;
 
-    // Zero-copy: use direct reference to emulator's frame buffer
-    const frame = getLatestFrameRef();
+    // Safe copy: ensures frame integrity during WebSocket transmission
+    const frame = getLatestFrameCopy(sourceFrameCopy);
     if (!frame) return;
 
     if (stats.lastProducedSeq > 0 && frame.meta.seq > stats.lastProducedSeq + 1) {
-      stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
+      const dropped = frame.meta.seq - stats.lastProducedSeq - 1;
+      stats.droppedFrames += dropped;
+      if (dropped > 10) {
+        console.warn(`[Stream] Dropped ${dropped} frames`);
+      }
     }
     stats.lastProducedSeq = frame.meta.seq;
 
-    pushFrameToClients(frame.frame);
-
-    // Only check auto-tune every 300 frames (~5 seconds at 60fps)
-    if (config.streaming.autoTune && ++frameCount >= 300) {
-      frameCount = 0;
-      maybeAutoTune();
-    }
+    pushFrameToClients(sourceFrameCopy);
   }, intervalMs) as any;
 }
 
