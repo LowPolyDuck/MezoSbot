@@ -5,12 +5,12 @@ services:
     plan: starter
     buildCommand: npm install && npm run build
     startCommand: npm start
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
+      - key: NODE_VERSION
+        value: 20
       - key: NODE_ENV
         value: production
-      - key: PORT
-        generateValue: false
       - key: DISCORD_TOKEN
         sync: false
       - key: DISCORD_CLIENT_ID
@@ -51,3 +51,17 @@ services:
         value: "3"
       - key: GB_HOLD_FRAMES
         value: "16"
+      - key: STREAM_PORT
+        sync: false
+      - key: STREAM_TARGET_FPS
+        value: "30"
+      - key: STREAM_MIN_FPS
+        value: "20"
+      - key: STREAM_MAX_FPS
+        value: "60"
+      - key: STREAM_AUTO_TUNE
+        value: "true"
+      - key: STREAM_VIEWER_SCALE
+        value: "4"
+      - key: STUN_SERVERS
+        value: "stun:stun.l.google.com:19302"

@@ -10,6 +10,7 @@ A Discord bot for depositing sats from an EVM network (Mezo), and tipping, distr
 - **Tip**: Send sats to another user
 - **Distribute**: Split sats among multiple users (e.g. `@user1 @user2 @user3`)
 - **Drop**: Create a drop — first N users to `/claim` get sats (rain/airdrop style)
+- **Browser stream**: Built-in WebRTC viewer endpoint for low-latency cloud play
 
 ## Setup
 
@@ -37,6 +38,21 @@ cp .env.example .env
 | `TOKEN_CONTRACT` | ERC20 token address (tBTC on Mezo: `0x18084fbA666a33d37592fA2633fD49a74DD93a88`) |
 | `TOKEN_DECIMALS` | Token decimals (tBTC: 18) |
 | `TREASURY_PRIVATE_KEY` | Private key of wallet that holds and sends funds |
+| `STREAM_PORT` / `PORT` | HTTP port for viewer + signaling (Render sets `PORT`) |
+| `STREAM_TARGET_FPS` | Stream encode target FPS (default `30`) |
+| `STREAM_MIN_FPS` / `STREAM_MAX_FPS` | Auto-tuning floor/ceiling |
+| `STREAM_AUTO_TUNE` | Enables adaptive FPS under load (`true`/`false`) |
+| `STUN_SERVERS` | Comma-separated STUN servers for WebRTC |
+
+### 2.1 WebRTC Runtime Dependency
+
+The browser stream server uses Node WebRTC (`@roamhq/wrtc`) at runtime.
+
+```bash
+npm install @roamhq/wrtc
+```
+
+If your host blocks native prebuilt downloads, install build tools or bake `@roamhq/wrtc` into your image during CI.
 
 ### 3. Fund the Treasury
 
@@ -88,6 +104,17 @@ Default config targets **Mezo mainnet** (tBTC). To use another EVM chain:
 - Set `RPC_URL` and `CHAIN_ID` for your chain
 - Set `TOKEN_CONTRACT` to the ERC20 address (or native ETH with minor code changes)
 - Adjust `TOKEN_DECIMALS` (8 for WBTC-style, 18 for most ERC20s)
+
+## Browser Stream Endpoints
+
+- Viewer: `/`
+- Health: `/healthz`
+- Metrics: `/metrics`
+- Signaling: `POST /api/webrtc/offer`
+
+## Cloud Fallback Split
+
+If Render cannot reach your latency target, keep this bot/emulator service on Render and move only media publishing to a dedicated low-latency worker. See `docs/streaming-fallback.md`.
 
 ## License
 

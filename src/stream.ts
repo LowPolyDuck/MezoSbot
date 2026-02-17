@@ -1,199 +1,453 @@
 /**
- * Web Canvas display — HTTP server + WebSocket frame streaming.
- *
- * Key optimization: the emulator outputs 60fps, but we only compress+send
- * at broadcast time (20fps). Raw frame capture is just a pointer swap — zero cost.
- * Compression happens once per broadcast, shared across all clients.
+ * Browser stream transport:
+ * - HTTP signaling endpoint for WebRTC session setup.
+ * - Server-side frame pacing with newest-frame drop policy.
+ * - Health + stream metrics for cloud tuning.
  */
-import http from "node:http";
-import { deflateRawSync } from "node:zlib";
-import { WebSocketServer, type WebSocket } from "ws";
-import { frameStream, GB_WIDTH, GB_HEIGHT } from "./emulator.js";
+import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { URL } from "node:url";
+import {
+  getLatestFrameCopy,
+  subscribeFrames,
+  GB_WIDTH,
+  GB_HEIGHT,
+  STREAM_FPS,
+  type FrameMeta,
+} from "./emulator.js";
+import { config } from "./config.js";
+import { rgbaToI420 } from "./streaming/rgbaToI420.js";
 
-const PORT = parseInt(process.env.PORT ?? "3000", 10);
-const WS_FPS = 20;
-const WS_INTERVAL = 1000 / WS_FPS;
-const FRAME_BYTES = GB_WIDTH * GB_HEIGHT * 4;
-const MAX_BUFFERED = 32 * 1024;
+let RTCPeerConnection: any;
+let RTCSessionDescription: any;
+let RTCVideoSource: any;
 
-let latestRaw: Buffer | null = null;
-let server: http.Server | null = null;
-let wss: WebSocketServer | null = null;
-let broadcastTimer: ReturnType<typeof setInterval> | null = null;
+interface StreamClient {
+  id: string;
+  pc: InstanceType<typeof RTCPeerConnection>;
+  source: any;
+  track: any;
+  connectedAtMs: number;
+}
 
-const HTML_PAGE = `<!DOCTYPE html>
+interface StreamStats {
+  producedFrames: number;
+  encodedFrames: number;
+  droppedFrames: number;
+  currentEncodeFps: number;
+  avgEncodeMs: number;
+  lastSourceFrameAtMs: number;
+  lastSentFrameAtMs: number;
+  lastProducedSeq: number;
+  activeClients: number;
+}
+
+const streamClients = new Map<string, StreamClient>();
+let httpServer: Server | null = null;
+let encodeLoop: ReturnType<typeof setTimeout> | null = null;
+let unsubscribeFrames: (() => void) | null = null;
+let latestObservedFrame: FrameMeta | null = null;
+let sourceFrameCopy = Buffer.alloc(GB_WIDTH * GB_HEIGHT * 4);
+const i420Buffer = Buffer.alloc(Math.floor((GB_WIDTH * GB_HEIGHT * 3) / 2));
+const requestedFps = Math.max(1, Math.min(config.streaming.maxFps, config.streaming.targetFps));
+const minFps = Math.max(1, Math.min(requestedFps, config.streaming.minFps));
+let currentEncodeFps = requestedFps;
+let tuneProducedStart = 0;
+let tuneDroppedStart = 0;
+let tuneWindowStartMs = Date.now();
+
+const stats: StreamStats = {
+  producedFrames: 0,
+  encodedFrames: 0,
+  droppedFrames: 0,
+  currentEncodeFps,
+  avgEncodeMs: 0,
+  lastSourceFrameAtMs: 0,
+  lastSentFrameAtMs: 0,
+  lastProducedSeq: 0,
+  activeClients: 0,
+};
+
+function streamBaseUrl(): string {
+  return `http://0.0.0.0:${config.streaming.port}`;
+}
+
+function buildViewerHtml(): string {
+  const ws = GB_WIDTH * config.streaming.viewerScale;
+  const hs = GB_HEIGHT * config.streaming.viewerScale;
+  return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MezoSbot — Game Boy</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #111;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    color: #ccc;
-  }
-  h1 {
-    font-size: 1.2rem;
-    margin-bottom: 12px;
-    color: #8bac0f;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-  }
-  canvas {
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;
-    border: 2px solid #333;
-    border-radius: 4px;
-  }
-  #status {
-    margin-top: 10px;
-    font-size: 0.85rem;
-    color: #666;
-  }
-  .connected { color: #8bac0f !important; }
-  .disconnected { color: #e44 !important; }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MezoSbot Stream</title>
+  <style>
+    body { margin: 0; background: #0b0d12; color: #e7edf7; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    .wrap { max-width: 960px; margin: 32px auto; padding: 0 16px; }
+    h1 { margin: 0 0 8px 0; font-size: 22px; }
+    p { margin: 0 0 18px 0; color: #a9b3c7; }
+    video { width: ${ws}px; height: ${hs}px; image-rendering: pixelated; border-radius: 12px; border: 1px solid #1d2330; background: black; }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+    button { border: 0; border-radius: 8px; background: #2463eb; color: white; padding: 10px 14px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    code { background: #121725; border-radius: 6px; padding: 2px 6px; }
+  </style>
 </head>
 <body>
-<h1>MezoSbot</h1>
-<canvas id="gb" width="${GB_WIDTH}" height="${GB_HEIGHT}"></canvas>
-<div id="status" class="disconnected">Connecting...</div>
-<script>
-(function() {
-  var W = ${GB_WIDTH}, H = ${GB_HEIGHT}, SCALE = 3;
-  var BYTES = W * H * 4;
-  var canvas = document.getElementById('gb');
-  canvas.style.width = (W * SCALE) + 'px';
-  canvas.style.height = (H * SCALE) + 'px';
-  var ctx = canvas.getContext('2d');
-  var img = ctx.createImageData(W, H);
-  var statusEl = document.getElementById('status');
-  var frames = 0, lastFps = 0, fpsTimer;
+  <div class="wrap">
+    <h1>MezoSbot Browser Stream</h1>
+    <p>Low-latency viewer. If stream stalls, press reconnect.</p>
+    <video id="video" autoplay playsinline muted></video>
+    <div class="row">
+      <button id="connect">Connect</button>
+      <span id="status">idle</span>
+    </div>
+    <div class="row">
+      <small>Signaling: <code>/api/webrtc/offer</code></small>
+    </div>
+  </div>
+  <script>
+    const statusEl = document.getElementById("status");
+    const connectBtn = document.getElementById("connect");
+    const video = document.getElementById("video");
+    let pc = null;
 
-  function inflate(compressed) {
-    var ds = new DecompressionStream('deflate-raw');
-    var writer = ds.writable.getWriter();
-    writer.write(compressed);
-    writer.close();
-    return new Response(ds.readable).arrayBuffer();
-  }
-
-  function connect() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    var ws = new WebSocket(proto + '//' + location.host + '/ws');
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = function() {
-      statusEl.textContent = 'Connected';
-      statusEl.className = 'connected';
-      frames = 0;
-      fpsTimer = setInterval(function() {
-        lastFps = frames;
-        frames = 0;
-        statusEl.textContent = 'Connected — ' + lastFps + ' fps';
-      }, 1000);
-    };
-
-    ws.onmessage = function(e) {
-      if (!(e.data instanceof ArrayBuffer) || e.data.byteLength === 0) return;
-      if (e.data.byteLength === BYTES) {
-        img.data.set(new Uint8ClampedArray(e.data));
-        ctx.putImageData(img, 0, 0);
-        frames++;
-      } else {
-        inflate(e.data).then(function(raw) {
-          if (raw.byteLength >= BYTES) {
-            img.data.set(new Uint8ClampedArray(raw, 0, BYTES));
-            ctx.putImageData(img, 0, 0);
-            frames++;
+    async function waitForIceGathering(pc) {
+      if (pc.iceGatheringState === "complete") return;
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 2000);
+        pc.addEventListener("icegatheringstatechange", () => {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(timeout);
+            resolve();
           }
-        }).catch(function() {});
+        });
+      });
+    }
+
+    async function connect() {
+      connectBtn.disabled = true;
+      statusEl.textContent = "connecting";
+      if (pc) pc.close();
+
+      pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      pc.ontrack = (event) => {
+        video.srcObject = event.streams[0];
+      };
+      pc.onconnectionstatechange = () => {
+        statusEl.textContent = pc.connectionState;
+      };
+
+      const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: false });
+      await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
+
+      const res = await fetch("/api/webrtc/offer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      });
+
+      if (!res.ok) {
+        throw new Error("signaling failed");
       }
-    };
 
-    ws.onclose = function() {
-      statusEl.textContent = 'Disconnected — reconnecting...';
-      statusEl.className = 'disconnected';
-      clearInterval(fpsTimer);
-      setTimeout(connect, 2000);
-    };
+      const answer = await res.json();
+      await pc.setRemoteDescription(answer);
+      statusEl.textContent = "connected";
+      connectBtn.disabled = false;
+    }
 
-    ws.onerror = function() { ws.close(); };
-  }
-
-  connect();
-})();
-</script>
+    connectBtn.addEventListener("click", () => {
+      connect().catch((err) => {
+        statusEl.textContent = "error: " + err.message;
+        connectBtn.disabled = false;
+      });
+    });
+  </script>
 </body>
 </html>`;
+}
 
-const clients = new Set<WebSocket>();
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(payload));
+}
 
-export async function startStream(): Promise<void> {
-  // Just grab the latest raw frame — this is called 60x/sec but it's
-  // only a buffer reference swap, no copying, no compression
-  frameStream.on("data", (chunk: Buffer) => {
-    if (chunk.length >= FRAME_BYTES) {
-      latestRaw = chunk;
-    }
-  });
+function sendHtml(res: ServerResponse, html: string): void {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(html);
+}
 
-  server = http.createServer((_req, res) => {
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-cache",
+function readJsonBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
-    res.end(HTML_PAGE);
-  });
-
-  wss = new WebSocketServer({ server, path: "/ws" });
-
-  wss.on("connection", (ws) => {
-    clients.add(ws);
-    ws.on("close", () => clients.delete(ws));
-    ws.on("error", () => clients.delete(ws));
-  });
-
-  // Compress + broadcast only at send time (20fps, not 60fps)
-  broadcastTimer = setInterval(() => {
-    if (!latestRaw || clients.size === 0) return;
-
-    const compressed = deflateRawSync(latestRaw.subarray(0, FRAME_BYTES), { level: 1 });
-
-    for (const ws of clients) {
-      if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED) {
-        ws.send(compressed, { binary: true });
+    req.on("end", () => {
+      try {
+        const body = Buffer.concat(chunks).toString("utf8");
+        resolve(body ? JSON.parse(body) : {});
+      } catch (err) {
+        reject(err);
       }
-    }
-  }, WS_INTERVAL);
-
-  server.listen(PORT, () => {
-    console.log(`[Canvas] Game Boy display at http://localhost:${PORT} (${WS_FPS}fps, zlib compressed)`);
+    });
+    req.on("error", reject);
   });
 }
 
+async function waitForIceGatheringComplete(pc: InstanceType<typeof RTCPeerConnection>): Promise<void> {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      resolve();
+    }, 2000);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  });
+}
+
+function removeClient(id: string): void {
+  const client = streamClients.get(id);
+  if (!client) return;
+  try {
+    client.pc.close();
+  } catch {
+    // no-op
+  }
+  try {
+    client.track.stop();
+  } catch {
+    // no-op
+  }
+  streamClients.delete(id);
+  stats.activeClients = streamClients.size;
+}
+
+async function handleOfferRequest(res: ServerResponse, body: any): Promise<void> {
+  const offerSdp = body?.sdp;
+  const offerType = body?.type;
+  if (!offerSdp || offerType !== "offer") {
+    sendJson(res, 400, { error: "invalid_offer" });
+    return;
+  }
+
+  const clientId = randomUUID();
+  const pc = new RTCPeerConnection({
+    iceServers: config.streaming.stunServers.map((urls) => ({ urls })),
+  });
+  const source = new RTCVideoSource();
+  const track = source.createTrack();
+  pc.addTrack(track);
+
+  pc.addEventListener("connectionstatechange", () => {
+    const state = pc.connectionState;
+    if (state === "failed" || state === "disconnected" || state === "closed") {
+      removeClient(clientId);
+    }
+  });
+
+  await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: offerSdp }));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await waitForIceGatheringComplete(pc);
+
+  streamClients.set(clientId, {
+    id: clientId,
+    pc,
+    source,
+    track,
+    connectedAtMs: Date.now(),
+  });
+  stats.activeClients = streamClients.size;
+
+  const local = pc.localDescription;
+  sendJson(res, 200, { type: local.type, sdp: local.sdp });
+}
+
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const method = req.method ?? "GET";
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  if (method === "GET" && url.pathname === "/") {
+    sendHtml(res, buildViewerHtml());
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/healthz") {
+    sendJson(res, 200, {
+      status: "ok",
+      stream: {
+        ...stats,
+        targetFps: requestedFps,
+      },
+    });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/metrics") {
+    sendJson(res, 200, {
+      stream: {
+        ...stats,
+        targetFps: requestedFps,
+      },
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/webrtc/offer") {
+    try {
+      const body = await readJsonBody(req);
+      await handleOfferRequest(res, body);
+    } catch {
+      sendJson(res, 400, { error: "invalid_json" });
+    }
+    return;
+  }
+
+  sendJson(res, 404, { error: "not_found" });
+}
+
+function pushFrameToClients(rgba: Buffer): void {
+  if (streamClients.size === 0) return;
+  const encodeStart = Date.now();
+  const { data } = rgbaToI420(rgba, GB_WIDTH, GB_HEIGHT, i420Buffer);
+  for (const client of streamClients.values()) {
+    try {
+      client.source.onFrame({
+        width: GB_WIDTH,
+        height: GB_HEIGHT,
+        data,
+      });
+    } catch {
+      removeClient(client.id);
+    }
+  }
+  stats.encodedFrames += 1;
+  const elapsed = Date.now() - encodeStart;
+  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : (stats.avgEncodeMs * 0.9) + (elapsed * 0.1);
+  stats.lastSentFrameAtMs = Date.now();
+}
+
+function startEncodeLoop(): void {
+  const loop = () => {
+    if (!latestObservedFrame) return;
+    const frame = getLatestFrameCopy(sourceFrameCopy);
+    if (!frame) return;
+    if (stats.lastProducedSeq > 0 && frame.meta.seq > stats.lastProducedSeq + 1) {
+      stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
+    }
+    stats.lastProducedSeq = frame.meta.seq;
+    pushFrameToClients(sourceFrameCopy);
+  };
+
+  const schedule = () => {
+    const intervalMs = Math.round(1000 / Math.max(1, currentEncodeFps));
+    encodeLoop = setTimeout(() => {
+      loop();
+      maybeAutoTune();
+      schedule();
+    }, intervalMs);
+  };
+
+  schedule();
+}
+
+function maybeAutoTune(): void {
+  if (!config.streaming.autoTune) return;
+  const now = Date.now();
+  if (now - tuneWindowStartMs < 5000) return;
+
+  const producedInWindow = Math.max(1, stats.producedFrames - tuneProducedStart);
+  const droppedInWindow = stats.droppedFrames - tuneDroppedStart;
+  const dropRatio = droppedInWindow / producedInWindow;
+
+  if (dropRatio > 0.25 && currentEncodeFps > minFps) {
+    currentEncodeFps = Math.max(minFps, currentEncodeFps - 5);
+  } else if (dropRatio < 0.05 && currentEncodeFps < requestedFps) {
+    currentEncodeFps = Math.min(requestedFps, currentEncodeFps + 5);
+  }
+
+  stats.currentEncodeFps = currentEncodeFps;
+  tuneWindowStartMs = now;
+  tuneProducedStart = stats.producedFrames;
+  tuneDroppedStart = stats.droppedFrames;
+}
+
+export async function startStream(): Promise<void> {
+  if (httpServer) return;
+  ensureWebRtcRuntime();
+
+  unsubscribeFrames = subscribeFrames((meta) => {
+    latestObservedFrame = meta;
+    stats.producedFrames += 1;
+    stats.lastSourceFrameAtMs = meta.capturedAtMs;
+  });
+
+  startEncodeLoop();
+
+  await new Promise<void>((resolve) => {
+    httpServer = createServer((req, res) => {
+      handleHttpRequest(req, res).catch((err) => {
+        console.error("[Stream] HTTP handler error:", (err as Error)?.message ?? err);
+        sendJson(res, 500, { error: "internal_error" });
+      });
+    });
+    httpServer.listen(config.streaming.port, "0.0.0.0", () => {
+      resolve();
+    });
+  });
+
+  console.log(`[Stream] Browser viewer ready at ${streamBaseUrl()}/`);
+  console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
+  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} source | encode ${requestedFps}fps (min ${minFps}) | emulator ${STREAM_FPS}fps`);
+}
+
+function ensureWebRtcRuntime(): void {
+  if (RTCPeerConnection && RTCSessionDescription && RTCVideoSource) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const wrtc = require("@roamhq/wrtc");
+    RTCPeerConnection = wrtc.RTCPeerConnection;
+    RTCSessionDescription = wrtc.RTCSessionDescription;
+    RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
+  } catch {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const wrtc = require("wrtc");
+      RTCPeerConnection = wrtc.RTCPeerConnection;
+      RTCSessionDescription = wrtc.RTCSessionDescription;
+      RTCVideoSource = wrtc.nonstandard?.RTCVideoSource;
+    } catch {
+      throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
+    }
+  }
+  if (!RTCPeerConnection || !RTCSessionDescription || !RTCVideoSource) {
+    throw new Error("WebRTC runtime unavailable. Install `@roamhq/wrtc` (preferred) and ensure native binaries are present.");
+  }
+}
+
 export function stopStream(): void {
-  if (broadcastTimer) {
-    clearInterval(broadcastTimer);
-    broadcastTimer = null;
+  if (encodeLoop) {
+    clearTimeout(encodeLoop);
+    encodeLoop = null;
   }
-  for (const ws of clients) {
-    ws.close();
+  if (unsubscribeFrames) {
+    unsubscribeFrames();
+    unsubscribeFrames = null;
   }
-  clients.clear();
-  if (wss) {
-    wss.close();
-    wss = null;
+  for (const id of streamClients.keys()) {
+    removeClient(id);
   }
-  if (server) {
-    server.close();
-    server = null;
+  if (httpServer) {
+    httpServer.close();
+    httpServer = null;
   }
 }
