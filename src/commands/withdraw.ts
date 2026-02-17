@@ -37,30 +37,51 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
+  // 1. Deduct balance
   if (!(await subtractBalance(interaction.user.id, amount))) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
   }
 
+  // 2. Insert withdrawal as PENDING
+  const { data: row } = await supabase.from("withdrawals").insert({
+    discord_id: interaction.user.id,
+    amount_sats: amount,
+    to_address: address.toLowerCase(),
+    status: "pending",
+  }).select("id").single();
+
+  const withdrawalId = row?.id;
+
+  // 3. Send the transaction and wait for receipt
   const result = await withdraw(address, amount);
 
-  if (result.error) {
+  // 4. Handle failure — refund balance + mark failed
+  if (result.error && !result.confirmed) {
     await addBalance(interaction.user.id, amount);
+
+    if (withdrawalId) {
+      await supabase.from("withdrawals").update({
+        status: "failed",
+        tx_hash: result.txHash ?? null,
+      }).eq("id", withdrawalId);
+    }
+
     return interaction.editReply({ content: `❌ Withdrawal failed: ${result.error}` });
   }
 
-  await supabase.from("withdrawals").insert({
-    discord_id: interaction.user.id,
-    tx_hash: result.txHash ?? null,
-    amount_sats: amount,
-    to_address: address.toLowerCase(),
-    status: "completed",
-  });
+  // 5. Transaction confirmed on-chain — mark completed
+  if (withdrawalId) {
+    await supabase.from("withdrawals").update({
+      status: "completed",
+      tx_hash: result.txHash ?? null,
+    }).eq("id", withdrawalId);
+  }
 
   const explorer = config.evm.explorerUrl;
 
   const embed = new EmbedBuilder()
     .setColor(0x00cc6a)
-    .setTitle("✅ Withdrawal Sent")
+    .setTitle("✅ Withdrawal Confirmed")
     .addFields(
       { name: "Amount", value: `**${formatSats(amount)}**`, inline: true },
       { name: "To", value: `\`${address.slice(0, 10)}...${address.slice(-8)}\``, inline: true },

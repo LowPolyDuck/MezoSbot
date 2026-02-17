@@ -288,19 +288,21 @@ async function main() {
 
   await client.login(config.discord.token);
 
-  // ── Game Boy emulator + browser stream ──
+  // ── Game Boy emulator ──
   const { romPath } = config.gameboy;
   if (romPath) {
     try {
       startEmulator(romPath);
       setupGameBoyCallbacks();
-      await startStream();
     } catch (err) {
       console.error("[GameBoy] Failed to start:", (err as Error)?.message ?? err);
     }
   } else {
     console.log("[GameBoy] ROM_PATH not set — emulator disabled");
   }
+
+  // ── Web canvas server (always starts — needed for Render health checks) ──
+  await startStream();
 }
 
 main().catch(console.error);
