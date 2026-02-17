@@ -1,10 +1,10 @@
 /**
- * Browser stream transport: MJPEG over HTTP
- * Simple, reliable motion JPEG streaming that works everywhere.
+ * Browser stream transport: Canvas + WebSocket
+ * Fast, low-latency streaming using raw frame data and HTML5 Canvas.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
-import sharp from "sharp";
+import { WebSocketServer, WebSocket } from "ws";
 import {
   getLatestFrameCopy,
   subscribeFrames,
@@ -16,7 +16,7 @@ import { config } from "./config.js";
 
 interface StreamClient {
   id: string;
-  res: ServerResponse;
+  ws: WebSocket;
   connectedAtMs: number;
 }
 
@@ -34,6 +34,7 @@ interface StreamStats {
 
 const streamClients = new Map<string, StreamClient>();
 let httpServer: Server | null = null;
+let wss: WebSocketServer | null = null;
 let encodeLoop: ReturnType<typeof setTimeout> | null = null;
 let unsubscribeFrames: (() => void) | null = null;
 let latestObservedFrame: FrameMeta | null = null;
@@ -64,6 +65,8 @@ function streamBaseUrl(): string {
 function buildViewerHtml(): string {
   const ws = GB_WIDTH * config.streaming.viewerScale;
   const hs = GB_HEIGHT * config.streaming.viewerScale;
+  const wsUrl = `ws://${process.env.RENDER ? '${window.location.host}' : '0.0.0.0:' + config.streaming.port}`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -75,15 +78,64 @@ function buildViewerHtml(): string {
     .wrap { max-width: 960px; margin: 32px auto; padding: 0 16px; }
     h1 { margin: 0 0 8px 0; font-size: 22px; }
     p { margin: 0 0 18px 0; color: #a9b3c7; }
-    img { width: ${ws}px; height: ${hs}px; image-rendering: pixelated; border-radius: 12px; border: 1px solid #1d2330; background: black; display: block; }
+    canvas { width: ${ws}px; height: ${hs}px; image-rendering: pixelated; border-radius: 12px; border: 1px solid #1d2330; background: black; display: block; }
+    .status { font-size: 14px; color: #6b7280; margin-top: 12px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>MezoSbot Browser Stream</h1>
-    <p>Low-latency MJPEG viewer.</p>
-    <img src="/stream.mjpeg" alt="Game stream" />
+    <p>Low-latency canvas streaming.</p>
+    <canvas id="canvas" width="${GB_WIDTH}" height="${GB_HEIGHT}"></canvas>
+    <div class="status" id="status">Connecting...</div>
   </div>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const status = document.getElementById('status');
+
+    // Disable image smoothing for pixel-perfect rendering
+    ctx.imageSmoothingEnabled = false;
+
+    let ws;
+    let reconnectTimer;
+
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(protocol + '//' + window.location.host + '/stream');
+
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        status.textContent = 'Connected';
+        status.style.color = '#10b981';
+      };
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          const rgba = new Uint8ClampedArray(event.data);
+          const imageData = new ImageData(rgba, ${GB_WIDTH}, ${GB_HEIGHT});
+          ctx.putImageData(imageData, 0, 0);
+        }
+      };
+
+      ws.onerror = () => {
+        status.textContent = 'Connection error';
+        status.style.color = '#ef4444';
+      };
+
+      ws.onclose = () => {
+        status.textContent = 'Disconnected - reconnecting...';
+        status.style.color = '#f59e0b';
+
+        // Reconnect after 2 seconds
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+    }
+
+    connect();
+  </script>
 </body>
 </html>`;
 }
@@ -104,9 +156,7 @@ function removeClient(id: string): void {
   const client = streamClients.get(id);
   if (!client) return;
   try {
-    if (!client.res.writableEnded) {
-      client.res.end();
-    }
+    client.ws.close();
   } catch {
     // no-op
   }
@@ -115,79 +165,30 @@ function removeClient(id: string): void {
   console.log(`[Stream] Client ${id} disconnected (${streamClients.size} active)`);
 }
 
-async function handleMjpegStream(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const clientId = `mjpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-
-  res.writeHead(200, {
-    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
-    "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma": "no-cache",
-    "Expires": "0",
-    "Connection": "close",
-  });
-
-  streamClients.set(clientId, {
-    id: clientId,
-    res,
-    connectedAtMs: Date.now(),
-  });
-  stats.activeClients = streamClients.size;
-
-  console.log(`[Stream] MJPEG client ${clientId} connected (${streamClients.size} active)`);
-
-  req.on("close", () => {
-    removeClient(clientId);
-  });
-
-  req.on("error", () => {
-    removeClient(clientId);
-  });
-}
-
-async function pushFrameToClients(rgba: Buffer): Promise<void> {
+function pushFrameToClients(rgba: Buffer): void {
   if (streamClients.size === 0) return;
 
   const encodeStart = Date.now();
 
-  try {
-    // Convert RGBA to JPEG using sharp
-    const jpeg = await sharp(rgba, {
-      raw: {
-        width: GB_WIDTH,
-        height: GB_HEIGHT,
-        channels: 4,
-      },
-    })
-      .jpeg({ quality: 80 })
-      .toBuffer();
-
-    // Send to all connected clients
-    for (const client of streamClients.values()) {
-      try {
-        if (!client.res.writable || client.res.writableEnded) {
-          removeClient(client.id);
-          continue;
-        }
-
-        client.res.write(`--frame\r\n`);
-        client.res.write(`Content-Type: image/jpeg\r\n`);
-        client.res.write(`Content-Length: ${jpeg.length}\r\n`);
-        client.res.write(`\r\n`);
-        client.res.write(jpeg);
-        client.res.write(`\r\n`);
-      } catch (err) {
-        console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
+  // Send raw RGBA data to all connected clients
+  for (const client of streamClients.values()) {
+    try {
+      if (client.ws.readyState !== WebSocket.OPEN) {
         removeClient(client.id);
+        continue;
       }
-    }
 
-    stats.encodedFrames += 1;
-    const elapsed = Date.now() - encodeStart;
-    stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.9 + elapsed * 0.1;
-    stats.lastSentFrameAtMs = Date.now();
-  } catch (err) {
-    console.error("[Stream] Frame encoding error:", (err as Error)?.message ?? err);
+      client.ws.send(rgba, { binary: true });
+    } catch (err) {
+      console.error(`[Stream] Failed to send frame to client ${client.id}:`, (err as Error)?.message ?? err);
+      removeClient(client.id);
+    }
   }
+
+  stats.encodedFrames += 1;
+  const elapsed = Date.now() - encodeStart;
+  stats.avgEncodeMs = stats.avgEncodeMs === 0 ? elapsed : stats.avgEncodeMs * 0.9 + elapsed * 0.1;
+  stats.lastSentFrameAtMs = Date.now();
 }
 
 function startEncodeLoop(): void {
@@ -199,7 +200,7 @@ function startEncodeLoop(): void {
       stats.droppedFrames += frame.meta.seq - stats.lastProducedSeq - 1;
     }
     stats.lastProducedSeq = frame.meta.seq;
-    pushFrameToClients(sourceFrameCopy).catch(() => {});
+    pushFrameToClients(sourceFrameCopy);
   };
 
   const schedule = () => {
@@ -241,11 +242,6 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 
   if (method === "GET" && url.pathname === "/") {
     sendHtml(res, buildViewerHtml());
-    return;
-  }
-
-  if (method === "GET" && url.pathname === "/stream.mjpeg") {
-    await handleMjpegStream(req, res);
     return;
   }
 
@@ -291,12 +287,37 @@ export async function startStream(): Promise<void> {
         sendJson(res, 500, { error: "internal_error" });
       });
     });
+
+    // WebSocket server
+    wss = new WebSocketServer({ server: httpServer, path: "/stream" });
+
+    wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+      const clientId = `ws-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+      streamClients.set(clientId, {
+        id: clientId,
+        ws,
+        connectedAtMs: Date.now(),
+      });
+      stats.activeClients = streamClients.size;
+
+      console.log(`[Stream] WebSocket client ${clientId} connected (${streamClients.size} active)`);
+
+      ws.on("close", () => {
+        removeClient(clientId);
+      });
+
+      ws.on("error", () => {
+        removeClient(clientId);
+      });
+    });
+
     httpServer.listen(config.streaming.port, "0.0.0.0", () => {
       resolve();
     });
   });
 
-  console.log(`[Stream] MJPEG viewer ready at ${streamBaseUrl()}/`);
+  console.log(`[Stream] Canvas+WebSocket viewer ready at ${streamBaseUrl()}/`);
   console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
   console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} source | encode ${requestedFps}fps (min ${minFps})`);
 }
@@ -312,6 +333,10 @@ export function stopStream(): void {
   }
   for (const id of streamClients.keys()) {
     removeClient(id);
+  }
+  if (wss) {
+    wss.close();
+    wss = null;
   }
   if (httpServer) {
     httpServer.close();
