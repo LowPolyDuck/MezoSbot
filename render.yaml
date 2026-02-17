@@ -48,15 +48,15 @@ services:
       - key: GB_ROUND_MS
         value: "500"
       - key: GB_SPEED
-        value: "2"
+        value: "4"
       - key: GB_HOLD_FRAMES
-        value: "12"
+        value: "10"
       - key: STREAM_TARGET_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_MIN_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_MAX_FPS
-        value: "30"
+        value: "60"
       - key: STREAM_AUTO_TUNE
         value: "false"
       - key: STREAM_VIEWER_SCALE
