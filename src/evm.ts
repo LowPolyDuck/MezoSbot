@@ -321,12 +321,71 @@ export async function withdraw(
         }
         return { txHash: tx.hash, gasSats, sentSats, confirmed: true };
       }
-    } catch {
-      // RPC hiccup — keep polling
+    } catch (err: unknown) {
+      // Log first error per tx so we can diagnose RPC issues in Render logs
+      if (i === 0) console.warn(`[Withdraw] Poll error for ${tx.hash}:`, (err as Error)?.message ?? err);
     }
   }
 
+  console.warn(`[Withdraw] Receipt timeout for ${tx.hash} after ${POLL_ATTEMPTS} attempts`);
   return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Receipt timeout: transaction not confirmed after 2 minutes" };
+}
+
+/**
+ * On startup, resolve any withdrawals left in "pending" state from a
+ * previous session (e.g. bot killed mid-poll, or before the BAD_DATA fix).
+ * Records older than 5 minutes are considered stuck — Mezo confirms in seconds.
+ */
+export async function recoverPendingWithdrawals(): Promise<void> {
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const { data: stale } = await supabase
+    .from("withdrawals")
+    .select("*")
+    .eq("status", "pending")
+    .lt("created_at", fiveMinutesAgo);
+
+  if (!stale || stale.length === 0) return;
+  console.log(`[Recovery] Found ${stale.length} stale pending withdrawal(s) to resolve`);
+
+  for (const w of stale) {
+    if (!w.tx_hash) {
+      // sendTransaction never got a hash — safe to refund
+      await addBalance(w.discord_id, w.amount_sats);
+      await supabase.from("withdrawals").update({ status: "failed" }).eq("id", w.id);
+      console.log(`[Recovery] Withdrawal ${w.id}: no tx_hash → refunded ${w.amount_sats} sats`);
+      continue;
+    }
+
+    try {
+      const receipt = await provider.send("eth_getTransactionReceipt", [w.tx_hash]);
+      if (receipt !== null) {
+        const status = parseInt(receipt.status, 16);
+        if (status === 1) {
+          await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
+          console.log(`[Recovery] Withdrawal ${w.id}: tx confirmed on-chain → marked completed (no refund)`);
+        } else {
+          await addBalance(w.discord_id, w.amount_sats);
+          await supabase.from("withdrawals").update({ status: "failed" }).eq("id", w.id);
+          console.log(`[Recovery] Withdrawal ${w.id}: tx reverted → refunded ${w.amount_sats} sats`);
+        }
+      } else {
+        // No receipt — check if tx is mined without a receipt
+        const tx = await provider.send("eth_getTransactionByHash", [w.tx_hash]);
+        if (tx?.blockNumber != null) {
+          // Tx is in a block but receipt unavailable — treat as confirmed
+          await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
+          console.log(`[Recovery] Withdrawal ${w.id}: tx in block (no receipt) → marked completed`);
+        } else {
+          // Tx dropped or never mined after 5+ min — refund
+          await addBalance(w.discord_id, w.amount_sats);
+          await supabase.from("withdrawals").update({ status: "failed" }).eq("id", w.id);
+          console.log(`[Recovery] Withdrawal ${w.id}: no receipt, tx not in block → refunded ${w.amount_sats} sats`);
+        }
+      }
+    } catch (err) {
+      console.error(`[Recovery] Withdrawal ${w.id}: RPC error —`, (err as Error)?.message ?? err);
+    }
+  }
 }
 
 /** Get treasury native balance in sats */

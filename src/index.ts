@@ -12,7 +12,7 @@ import {
 } from "discord.js";
 import { config } from "./config.js";
 import { formatSats } from "./format.js";
-import { initEVM, getTreasuryAddress, startDepositPoller, registerDepositAddress } from "./evm.js";
+import { initEVM, getTreasuryAddress, startDepositPoller, registerDepositAddress, recoverPendingWithdrawals } from "./evm.js";
 import { commands, commandsData } from "./commands/index.js";
 import {
   startEmulator,
@@ -263,6 +263,11 @@ async function handleDropButton(interaction: ButtonInteraction) {
 async function main() {
   initEVM();
   console.log(`Treasury: ${getTreasuryAddress()}`);
+
+  // Resolve any withdrawals left pending from a previous session
+  recoverPendingWithdrawals().catch((err) =>
+    console.error("[Recovery] Failed:", (err as Error)?.message ?? err)
+  );
 
   startDepositPoller((discordId, amountSats, gasSats) => {
     console.log(`Auto-deposit: ${formatSats(amountSats)} (gas: ~${formatSats(gasSats)}) for ${discordId}`);
