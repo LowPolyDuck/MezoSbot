@@ -37,12 +37,14 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
-  // 1. Block concurrent withdrawals
+  // 1. Block concurrent withdrawals (only consider pending records < 10 min old)
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   const { data: pending } = await supabase
     .from("withdrawals")
     .select("id")
     .eq("discord_id", interaction.user.id)
     .eq("status", "pending")
+    .gte("created_at", tenMinutesAgo)
     .limit(1)
     .single();
 
