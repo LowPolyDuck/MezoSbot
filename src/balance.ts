@@ -39,11 +39,13 @@ export async function addBalance(discordId: string, amountSats: number): Promise
 }
 
 export async function subtractBalance(discordId: string, amountSats: number): Promise<boolean> {
-  const bal = await getBalance(discordId);
   const rounded = roundSats(amountSats);
-  if (rounded <= 0 || bal < rounded) return false;
-  await supabase.rpc("subtract_balance", { p_discord_id: discordId, p_amount: rounded });
-  return true;
+  if (rounded <= 0) return false;
+  const { data } = await supabase.rpc("subtract_balance_if_sufficient", {
+    p_discord_id: discordId,
+    p_amount: rounded,
+  });
+  return data === true;
 }
 
 export async function linkWallet(discordId: string, walletAddress: string): Promise<{ ok: boolean; error?: string }> {

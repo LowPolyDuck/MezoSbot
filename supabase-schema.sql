@@ -87,6 +87,25 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION subtract_balance_if_sufficient(
+  p_discord_id TEXT,
+  p_amount     DOUBLE PRECISION
+)
+RETURNS boolean AS $$
+DECLARE
+  rows_updated INTEGER;
+BEGIN
+  UPDATE users
+  SET balance_sats = balance_sats - p_amount,
+      updated_at   = now()
+  WHERE discord_id  = p_discord_id
+    AND balance_sats >= p_amount;
+
+  GET DIAGNOSTICS rows_updated = ROW_COUNT;
+  RETURN rows_updated > 0;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_links_discord ON links(discord_id);
 CREATE INDEX IF NOT EXISTS idx_links_wallet ON links(wallet_address);
