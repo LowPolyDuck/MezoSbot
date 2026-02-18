@@ -37,7 +37,22 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
-  // 1. Deduct balance
+  // 1. Block concurrent withdrawals
+  const { data: pending } = await supabase
+    .from("withdrawals")
+    .select("id")
+    .eq("discord_id", interaction.user.id)
+    .eq("status", "pending")
+    .limit(1)
+    .single();
+
+  if (pending) {
+    return interaction.editReply({
+      content: "⏳ You already have a withdrawal in progress. Please wait for it to complete.",
+    });
+  }
+
+  // 2. Deduct balance atomically
   if (!(await subtractBalance(interaction.user.id, amount))) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
   }
