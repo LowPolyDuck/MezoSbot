@@ -91,7 +91,7 @@ CREATE OR REPLACE FUNCTION subtract_balance_if_sufficient(
   p_discord_id TEXT,
   p_amount     DOUBLE PRECISION
 )
-RETURNS boolean AS $$
+RETURNS boolean AS $func$
 DECLARE
   rows_updated INTEGER;
 BEGIN
@@ -104,7 +104,7 @@ BEGIN
   GET DIAGNOSTICS rows_updated = ROW_COUNT;
   RETURN rows_updated > 0;
 END;
-$$ LANGUAGE plpgsql;
+$func$ LANGUAGE plpgsql;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_links_discord ON links(discord_id);
