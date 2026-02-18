@@ -305,18 +305,27 @@ export async function withdraw(
     return { error: err?.reason ?? err?.message ?? String(e) };
   }
 
-  // Wait for on-chain confirmation (60s timeout)
-  try {
-    const receipt = await tx.wait(1, 60_000);
-    if (!receipt || receipt.status === 0) {
-      return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Transaction reverted on-chain" };
+  // Poll for confirmation manually — tx.wait() is unreliable on Mezo RPC
+  // (same pattern used in fundGasAndSweep above)
+  const POLL_INTERVAL_MS = 3_000;
+  const POLL_ATTEMPTS = 40; // ~2 minutes total
+
+  for (let i = 0; i < POLL_ATTEMPTS; i++) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    try {
+      const receipt = await provider.getTransactionReceipt(tx.hash);
+      if (receipt !== null) {
+        if (receipt.status === 0) {
+          return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Transaction reverted on-chain" };
+        }
+        return { txHash: tx.hash, gasSats, sentSats, confirmed: true };
+      }
+    } catch {
+      // RPC hiccup — keep polling
     }
-    return { txHash: tx.hash, gasSats, sentSats, confirmed: true };
-  } catch (e: unknown) {
-    // Timeout or network error — tx may still confirm later
-    const err = e as { message?: string };
-    return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: `Receipt timeout: ${err?.message ?? "unknown"}` };
   }
+
+  return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Receipt timeout: transaction not confirmed after 2 minutes" };
 }
 
 /** Get treasury native balance in sats */
