@@ -83,7 +83,14 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       }).eq("id", withdrawalId);
     }
 
-    return interaction.editReply({ content: `❌ Withdrawal failed: ${result.error}` });
+    const failMsg = { content: `❌ Withdrawal failed: ${result.error}` };
+    try {
+      return await interaction.editReply(failMsg);
+    } catch {
+      // Interaction expired (e.g. bot restarted mid-poll) — fall back to DM
+      interaction.user.send(failMsg).catch(() => {});
+      return;
+    }
   }
 
   // 5. Transaction confirmed on-chain — mark completed
@@ -117,5 +124,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   embed.setTimestamp();
 
-  await interaction.editReply({ embeds: [embed] });
+  try {
+    await interaction.editReply({ embeds: [embed] });
+  } catch {
+    // Interaction expired (e.g. bot restarted mid-poll) — fall back to DM
+    interaction.user.send({ embeds: [embed] }).catch(() => {});
+  }
 }

@@ -102,6 +102,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     await handler(interaction as ChatInputCommandInteraction);
   } catch (err) {
+    // 10062 = Unknown Interaction: interaction token expired, typically from
+    // pre-restart interactions re-delivered to the new instance. Not a real error.
+    if ((err as { code?: number })?.code === 10062) return;
     console.error(`Command /${interaction.commandName} error:`, (err as Error)?.message ?? err);
     const msg = { content: "❌ Something went wrong.", ephemeral: true };
     if (interaction.replied || interaction.deferred) {

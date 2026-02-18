@@ -375,11 +375,27 @@ export async function recoverPendingWithdrawals(): Promise<void> {
           // Tx is in a block but receipt unavailable — treat as confirmed
           await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
           console.log(`[Recovery] Withdrawal ${w.id}: tx in block (no receipt) → marked completed`);
+        } else if (tx !== null) {
+          // Tx exists on-chain but blockNumber is null = still in mempool.
+          // Mezo confirms in seconds so this is unusual, but don't refund —
+          // leave pending and let the next recovery pass resolve it.
+          console.log(`[Recovery] Withdrawal ${w.id}: tx ${w.tx_hash} still in mempool — leaving pending`);
         } else {
-          // Tx dropped or never mined after 5+ min — refund
-          await addBalance(w.discord_id, w.amount_sats);
-          await supabase.from("withdrawals").update({ status: "failed" }).eq("id", w.id);
-          console.log(`[Recovery] Withdrawal ${w.id}: no receipt, tx not in block → refunded ${w.amount_sats} sats`);
+          // tx === null: this node has no record of it.
+          // Could be RPC lag at startup, so retry once before refunding.
+          await new Promise((r) => setTimeout(r, 4000));
+          const txRetry = await provider.send("eth_getTransactionByHash", [w.tx_hash]);
+          if (txRetry?.blockNumber != null) {
+            await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
+            console.log(`[Recovery] Withdrawal ${w.id}: tx found in block on retry → marked completed`);
+          } else if (txRetry !== null) {
+            console.log(`[Recovery] Withdrawal ${w.id}: tx in mempool on retry — leaving pending`);
+          } else {
+            // Still null after retry — tx genuinely dropped
+            await addBalance(w.discord_id, w.amount_sats);
+            await supabase.from("withdrawals").update({ status: "failed" }).eq("id", w.id);
+            console.log(`[Recovery] Withdrawal ${w.id}: tx not found after retry → refunded ${w.amount_sats} sats`);
+          }
         }
       }
     } catch (err) {
