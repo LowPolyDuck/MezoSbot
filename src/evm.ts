@@ -313,9 +313,10 @@ export async function withdraw(
   for (let i = 0; i < POLL_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     try {
-      const receipt = await provider.getTransactionReceipt(tx.hash);
+      const receipt = await provider.send("eth_getTransactionReceipt", [tx.hash]);
       if (receipt !== null) {
-        if (receipt.status === 0) {
+        const status = parseInt(receipt.status, 16);
+        if (status === 0) {
           return { txHash: tx.hash, gasSats, sentSats, confirmed: false, error: "Transaction reverted on-chain" };
         }
         return { txHash: tx.hash, gasSats, sentSats, confirmed: true };
