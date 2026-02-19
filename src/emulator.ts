@@ -26,7 +26,7 @@ const TICK_MS = 1000 / STREAM_FPS;
 const FRAMES_PER_TICK = BASE_SPEED;
 const HOLD_FRAMES = parseInt(process.env.GB_HOLD_FRAMES ?? "16", 10);
 const FRAME_BYTES = GB_WIDTH * GB_HEIGHT * 4;
-const SAVE_INTERVAL_MS = 30000; // Auto-save every 30 seconds
+const SAVE_INTERVAL_MS = 300000; // Auto-save every 5 minutes
 const SAVES_DIR = path.join(process.cwd(), "saves");
 
 export interface FrameMeta {
