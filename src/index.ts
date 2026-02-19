@@ -301,7 +301,7 @@ async function main() {
   const { romPath } = config.gameboy;
   if (romPath) {
     try {
-      startEmulator(romPath);
+      await startEmulator(romPath);
       setupGameBoyCallbacks();
     } catch (err) {
       console.error("[GameBoy] Failed to start:", (err as Error)?.message ?? err);
@@ -315,15 +315,15 @@ async function main() {
 }
 
 // Graceful shutdown: save game state before exit
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
   console.log("\n[Shutdown] Received SIGINT, saving game state...");
-  stopEmulator();
+  await stopEmulator();
   process.exit(0);
 });
 
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
   console.log("\n[Shutdown] Received SIGTERM, saving game state...");
-  stopEmulator();
+  await stopEmulator();
   process.exit(0);
 });
 
