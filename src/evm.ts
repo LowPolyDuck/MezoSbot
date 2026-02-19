@@ -10,6 +10,25 @@ export function getProvider() {
   return provider;
 }
 
+/**
+ * Raw JSON-RPC call that bypasses ethers.js batching.
+ * The Mezo RPC occasionally wraps single responses in a batch array
+ * (e.g. `[{"jsonrpc":"2.0","result":{...}}]`), which causes ethers v6 to
+ * throw BAD_DATA.  This helper unwraps the array before parsing.
+ */
+async function rawRpcCall(method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch(config.evm.rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+  });
+  const data: unknown = await res.json();
+  const item = Array.isArray(data) ? data[0] : data;
+  const rpc = item as { error?: { message?: string }; result?: unknown };
+  if (rpc.error) throw new Error(rpc.error.message ?? JSON.stringify(rpc.error));
+  return rpc.result ?? null;
+}
+
 export function getTreasuryAddress(): string {
   return wallet.address;
 }
@@ -69,7 +88,7 @@ async function getGasPrice(): Promise<bigint> {
 
   // 2) Direct eth_gasPrice RPC call
   try {
-    const raw = await provider.send("eth_gasPrice", []);
+    const raw = await rawRpcCall("eth_gasPrice", []) as string;
     const price = BigInt(raw);
     if (price > 0n) return price;
   } catch {}
@@ -313,7 +332,7 @@ export async function withdraw(
   for (let i = 0; i < POLL_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     try {
-      const receipt = await provider.send("eth_getTransactionReceipt", [tx.hash]);
+      const receipt = await rawRpcCall("eth_getTransactionReceipt", [tx.hash]) as { status: string } | null;
       if (receipt !== null) {
         const status = parseInt(receipt.status, 16);
         if (status === 0) {
@@ -357,7 +376,7 @@ export async function recoverPendingWithdrawals(): Promise<void> {
     }
 
     try {
-      const receipt = await provider.send("eth_getTransactionReceipt", [w.tx_hash]);
+      const receipt = await rawRpcCall("eth_getTransactionReceipt", [w.tx_hash]) as { status: string } | null;
       if (receipt !== null) {
         const status = parseInt(receipt.status, 16);
         if (status === 1) {
@@ -370,7 +389,7 @@ export async function recoverPendingWithdrawals(): Promise<void> {
         }
       } else {
         // No receipt — check if tx is mined without a receipt
-        const tx = await provider.send("eth_getTransactionByHash", [w.tx_hash]);
+        const tx = await rawRpcCall("eth_getTransactionByHash", [w.tx_hash]) as { blockNumber?: string | null } | null;
         if (tx?.blockNumber != null) {
           // Tx is in a block but receipt unavailable — treat as confirmed
           await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
@@ -384,7 +403,7 @@ export async function recoverPendingWithdrawals(): Promise<void> {
           // tx === null: this node has no record of it.
           // Could be RPC lag at startup, so retry once before refunding.
           await new Promise((r) => setTimeout(r, 4000));
-          const txRetry = await provider.send("eth_getTransactionByHash", [w.tx_hash]);
+          const txRetry = await rawRpcCall("eth_getTransactionByHash", [w.tx_hash]) as { blockNumber?: string | null } | null;
           if (txRetry?.blockNumber != null) {
             await supabase.from("withdrawals").update({ status: "completed" }).eq("id", w.id);
             console.log(`[Recovery] Withdrawal ${w.id}: tx found in block on retry → marked completed`);
