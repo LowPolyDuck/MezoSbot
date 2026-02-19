@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { supabase } from "./db.js";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const Gameboy = require("serverboy");
@@ -136,51 +137,95 @@ export function getLatestFrameCopy(target?: Buffer): { frame: Buffer; meta: Fram
 
 /* ── Save state management ─────────────────────────────────────────── */
 
-function getSaveFilePath(romPath: string): string {
-  const romName = path.basename(romPath, path.extname(romPath));
-  return path.join(SAVES_DIR, `${romName}.sav`);
+function getRomName(romPath: string): string {
+  return path.basename(romPath, path.extname(romPath));
 }
 
-function loadSaveState(romPath: string): any[] | null {
+function getSaveFilePath(romPath: string): string {
+  return path.join(SAVES_DIR, `${getRomName(romPath)}.sav`);
+}
+
+async function loadSaveState(romPath: string): Promise<any[] | null> {
+  const romName = getRomName(romPath);
+
+  // Try Supabase first
+  try {
+    const { data, error } = await supabase
+      .from("game_saves")
+      .select("save_data")
+      .eq("rom_name", romName)
+      .single();
+
+    if (!error && data?.save_data) {
+      const saveData = JSON.parse(data.save_data);
+      console.log(`[Emulator] Loaded save state from Supabase for "${romName}"`);
+      return saveData;
+    }
+  } catch (err) {
+    console.warn(`[Emulator] Supabase load failed, trying local fallback:`, (err as Error)?.message ?? err);
+  }
+
+  // Fall back to local file
   const savePath = getSaveFilePath(romPath);
   try {
     if (fs.existsSync(savePath)) {
       const saveData = JSON.parse(fs.readFileSync(savePath, "utf-8"));
-      console.log(`[Emulator] Loaded save state from ${savePath}`);
+      console.log(`[Emulator] Loaded save state from local file ${savePath}`);
       return saveData;
     }
   } catch (err) {
-    console.warn(`[Emulator] Failed to load save state:`, (err as Error)?.message ?? err);
+    console.warn(`[Emulator] Failed to load local save state:`, (err as Error)?.message ?? err);
   }
+
   return null;
 }
 
-function saveSaveState(): void {
+function saveSaveState(awaitSupabase?: boolean): Promise<void> | void {
   if (!gb || !running || !currentRomPath) return;
 
   try {
     const saveData = gb.getSaveData();
-    if (!saveData || saveData.length === 0) return; // No save data to persist
+    if (!saveData || saveData.length === 0) return;
 
-    // Ensure saves directory exists
+    const json = JSON.stringify(saveData);
+    const romName = getRomName(currentRomPath);
+
+    // Local write (synchronous, fast)
     if (!fs.existsSync(SAVES_DIR)) {
       fs.mkdirSync(SAVES_DIR, { recursive: true });
     }
-
     const savePath = getSaveFilePath(currentRomPath);
-    fs.writeFileSync(savePath, JSON.stringify(saveData), "utf-8");
-    console.log(`[Emulator] Saved game state to ${savePath}`);
+    fs.writeFileSync(savePath, json, "utf-8");
+    console.log(`[Emulator] Saved game state locally to ${savePath}`);
+
+    // Supabase upsert
+    const upsertPromise = (async () => {
+      const { error } = await supabase
+        .from("game_saves")
+        .upsert({ rom_name: romName, save_data: json, updated_at: new Date().toISOString() });
+      if (error) {
+        console.error(`[Emulator] Supabase save failed:`, error.message);
+      } else {
+        console.log(`[Emulator] Saved game state to Supabase for "${romName}"`);
+        // Remove local file now that Supabase has the authoritative copy
+        try { fs.unlinkSync(savePath); } catch { /* already gone */ }
+      }
+    })();
+
+    if (awaitSupabase) return upsertPromise;
+    // Fire-and-forget during normal operation
+    upsertPromise.catch(() => {});
   } catch (err) {
     console.error(`[Emulator] Failed to save state:`, (err as Error)?.message ?? err);
   }
 }
 
-export function startEmulator(romPath: string): void {
+export async function startEmulator(romPath: string): Promise<void> {
   if (running) return;
 
   currentRomPath = romPath;
   const romData = fs.readFileSync(romPath);
-  const saveData = loadSaveState(romPath);
+  const saveData = await loadSaveState(romPath);
 
   gb = new Gameboy();
   gb.loadRom(romData, saveData);
@@ -200,11 +245,11 @@ export function startEmulator(romPath: string): void {
   }
 }
 
-export function stopEmulator(): void {
+export async function stopEmulator(): Promise<void> {
   if (!running) return;
 
-  // Save state before shutdown
-  saveSaveState();
+  // Save state before shutdown — await Supabase so it completes before exit
+  await saveSaveState(true);
 
   running = false;
   if (loopHandle) clearInterval(loopHandle);

@@ -106,6 +106,12 @@ BEGIN
 END;
 $func$ LANGUAGE plpgsql;
 
+CREATE TABLE IF NOT EXISTS game_saves (
+  rom_name   TEXT PRIMARY KEY,
+  save_data  TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_links_discord ON links(discord_id);
 CREATE INDEX IF NOT EXISTS idx_links_wallet ON links(wallet_address);
