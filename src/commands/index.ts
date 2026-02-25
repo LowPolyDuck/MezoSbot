@@ -14,6 +14,17 @@ import * as treasury from "./treasury.js";
 import * as backfill from "./backfill.js";
 import * as credit from "./credit.js";
 import * as sweep from "./sweep.js";
+import * as farm from "./farm.js";
+import * as harvest from "./harvest.js";
+import * as seeds from "./seeds.js";
+import * as expand from "./expand.js";
+import * as seeddrop from "./seeddrop.js";
+import * as farmfund from "./farmfund.js";
+import * as shop from "./shop.js";
+import * as shopcreate from "./shopcreate.js";
+import * as shopdrop from "./shopdrop.js";
+import * as shopmine from "./shopmine.js";
+import * as shopclaim from "./shopclaim.js";
 import { gameboyCommands } from "./gameboy.js";
 
 const baseCommands = [
@@ -32,6 +43,17 @@ const baseCommands = [
   backfill,
   credit,
   sweep,
+  farm,
+  harvest,
+  seeds,
+  expand,
+  seeddrop,
+  farmfund,
+  shop,
+  shopcreate,
+  shopdrop,
+  shopmine,
+  shopclaim,
 ];
 
 // Merge base commands + gameboy button commands into a single list

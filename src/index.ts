@@ -33,6 +33,13 @@ import {
   getClaimants,
   type Drop,
 } from "./drops.js";
+import {
+  processSeedDropClaim,
+  buildSeedDropEmbed,
+  buildSeedDropClaimButton,
+  getSeedDropClaimants,
+  type SeedDrop,
+} from "./seeddrop.js";
 import { supabase } from "./db.js";
 import { extractProfile, updateUserProfile } from "./profile.js";
 
@@ -90,6 +97,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const customId = interaction.customId;
     if (customId.startsWith("claim_drop_")) {
       await handleDropButton(interaction as ButtonInteraction);
+    } else if (customId.startsWith("claim_seed_drop_")) {
+      await handleSeedDropButton(interaction as ButtonInteraction);
     }
     return;
   }
@@ -258,6 +267,53 @@ async function handleDropButton(interaction: ButtonInteraction) {
       .setDescription(`${result.remaining} claim${result.remaining === 1 ? "" : "s"} left`);
 
     await interaction.editReply({ embeds: [fallbackEmbed] });
+  }
+}
+
+/* ── Seed drop claim button handler ──────────────────────────── */
+
+async function handleSeedDropButton(interaction: ButtonInteraction) {
+  const dropId = parseInt(interaction.customId.replace("claim_seed_drop_", ""), 10);
+  if (isNaN(dropId)) return;
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const result = await processSeedDropClaim(dropId, interaction.user.id);
+
+  if (!result.ok) {
+    await interaction.editReply({ content: `❌ ${result.error}` });
+    return;
+  }
+
+  const { data: drop } = await supabase
+    .from("farm_seed_drops")
+    .select("*")
+    .eq("id", dropId)
+    .single();
+
+  if (drop) {
+    const crop = drop.crop_id;
+    const claimEmbed = new EmbedBuilder()
+      .setColor(0x4caf50)
+      .setTitle("🌱 Seeds Claimed!")
+      .setDescription(`Your ${crop} is now growing in plot \`[${result.slot}]\`!`)
+      .addFields({ name: "Remaining", value: `**${result.remaining}**`, inline: true })
+      .setFooter({ text: "Run /harvest when it's ready" });
+
+    await interaction.editReply({ embeds: [claimEmbed] });
+
+    try {
+      const claimedBy = await getSeedDropClaimants(dropId);
+      const embed = buildSeedDropEmbed(drop as SeedDrop, claimedBy);
+      const row = buildSeedDropClaimButton(dropId, result.completed);
+      await interaction.message.edit({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
+    } catch (err) {
+      console.error("Failed to update seed drop message:", (err as Error)?.message ?? err);
+    }
+  } else {
+    await interaction.editReply({
+      content: `🌱 Seeds claimed! Your crop is growing in plot \`[${result.slot}]\`. Run \`/harvest\` when ready.`,
+    });
   }
 }
 
