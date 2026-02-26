@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS drops (
   channel_id TEXT NOT NULL,
   creator_id TEXT NOT NULL,
   message_id TEXT,
+  eligible_role_id TEXT,
   total_sats DOUBLE PRECISION NOT NULL,
   per_claim_sats DOUBLE PRECISION NOT NULL,
   max_claims INTEGER NOT NULL,
@@ -52,6 +53,8 @@ CREATE TABLE IF NOT EXISTS drops (
   status TEXT DEFAULT 'active',
   created_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE drops ADD COLUMN IF NOT EXISTS eligible_role_id TEXT;
 
 CREATE TABLE IF NOT EXISTS drop_claims (
   id BIGSERIAL PRIMARY KEY,

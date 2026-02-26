@@ -80,10 +80,13 @@ npm run dev
 | `/deposit` | Get deposit address and instructions |
 | `/balance` | Check your sats balance |
 | `/withdraw <amount> <address>` | Withdraw sats to an address |
-| `/tip <user> <amount>` | Tip another user |
+| `/tip <user> <amount> [message]` | Tip another user with an optional message |
 | `/distribute <amount> <@users>` | Split sats among multiple users |
-| `/drop <total> <per_claim> <max_claims>` | Create a claimable drop |
+| `/rain <amount> <count> [role] [message]` | Rain sats on recently active users (optionally role-filtered) |
+| `/drop <total> <per_claim> <max_claims> [role]` | Create a claimable drop (optionally role-gated) |
 | `/claim <drop_id>` | Claim from an active drop |
+
+Recipients receive DMs when they are credited from tips, rains, distributions, and drop claims.
 
 **All amounts use sats** and support decimals (e.g. `100.5`, `0.25`) for easier denomination. Precision: 6 decimal places.
 

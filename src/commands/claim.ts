@@ -2,6 +2,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
 import { supabase } from "../db.js";
 import { processClaim, updateDropMessage, type Drop } from "../drops.js";
 import { formatSats } from "../format.js";
+import { sendTransferReceivedDm } from "../notifications.js";
 
 export const data = {
   name: "claim",
@@ -24,11 +25,24 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return interaction.editReply({ content: "❌ No active drop in this channel." });
   }
 
-  const result = await processClaim(drop.id, interaction.user.id);
+  const member = interaction.guild
+    ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
+    : null;
+  const claimantRoleIds = member ? [...member.roles.cache.keys()] : [];
+
+  const result = await processClaim(drop.id, interaction.user.id, claimantRoleIds);
 
   if (!result.ok) {
     return interaction.editReply({ content: `❌ ${result.error}` });
   }
+
+  await sendTransferReceivedDm({
+    client: interaction.client,
+    recipientId: interaction.user.id,
+    senderId: result.creatorId ?? drop.creator_id,
+    amountSats: result.amountSats ?? drop.per_claim_sats,
+    kind: "drop",
+  });
 
   const embed = new EmbedBuilder()
     .setColor(0x00cc6a)

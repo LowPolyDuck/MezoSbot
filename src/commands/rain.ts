@@ -2,6 +2,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction, type TextChannel } from
 import { subtractBalance, addBalance } from "../balance.js";
 import { registerDepositAddress } from "../evm.js";
 import { formatSats, roundSats } from "../format.js";
+import { sendTransferReceivedDm } from "../notifications.js";
 
 export const data = {
   name: "rain",
@@ -9,6 +10,8 @@ export const data = {
   options: [
     { name: "amount", type: 10 as const, description: "Total sats to rain", required: true, minValue: 0.000001 },
     { name: "count", type: 4 as const, description: "Number of users to rain on", required: true, minValue: 1, maxValue: 50 },
+    { name: "role", type: 8 as const, description: "Only rain on users with this role", required: false },
+    { name: "message", type: 3 as const, description: "Optional message for recipients", required: false },
   ],
 };
 
@@ -26,6 +29,14 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   const totalAmount = interaction.options.getNumber("amount", true);
   const count = interaction.options.getInteger("count", true);
+  const role = interaction.options.getRole("role");
+  const rawMessage = interaction.options.getString("message");
+  const trimmedMessage = rawMessage?.trim() ?? "";
+  const customMessage = trimmedMessage.length > 0 ? trimmedMessage : undefined;
+
+  if (customMessage && customMessage.length > 200) {
+    return interaction.editReply({ content: "❌ Message must be 200 characters or fewer." });
+  }
 
   // Fetch recent messages, sort newest-first, pick the last N unique users
   let fetched;
@@ -40,14 +51,25 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const seen = new Set<string>();
 
   for (const msg of sorted) {
-    if (!msg.author.bot && msg.author.id !== interaction.user.id && !seen.has(msg.author.id)) {
-      seen.add(msg.author.id);
-      activeUserIds.push(msg.author.id);
+    if (msg.author.bot || msg.author.id === interaction.user.id || seen.has(msg.author.id)) continue;
+
+    seen.add(msg.author.id);
+
+    if (role) {
+      const member = await interaction.guild.members.fetch(msg.author.id).catch(() => null);
+      if (!member || !member.roles.cache.has(role.id)) {
+        continue;
+      }
     }
+
+    activeUserIds.push(msg.author.id);
     if (activeUserIds.length >= count) break;
   }
 
   if (activeUserIds.length === 0) {
+    if (role) {
+      return interaction.editReply({ content: `❌ No recently active users found in this channel with the **${role.name}** role.` });
+    }
     return interaction.editReply({ content: "❌ No recently active users found in this channel." });
   }
 
@@ -62,11 +84,19 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
   }
 
-  // Parallelize balance additions and address registrations
+  // Parallelize balance additions, address registrations, and recipient DMs.
   await Promise.all(
     activeUserIds.map(async (uid) => {
       await addBalance(uid, perUser);
-      await registerDepositAddress(uid).catch(() => {}); // Fire-and-forget address registration
+      await registerDepositAddress(uid).catch(() => {});
+      await sendTransferReceivedDm({
+        client: interaction.client,
+        recipientId: uid,
+        senderId: interaction.user.id,
+        amountSats: perUser,
+        kind: "rain",
+        customMessage,
+      });
     })
   );
 
@@ -83,6 +113,13 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       { name: "Rained On", value: recipients },
     )
     .setTimestamp();
+
+  if (role) {
+    embed.addFields({ name: "Eligible Role", value: `<@&${role.id}>`, inline: true });
+  }
+  if (customMessage) {
+    embed.addFields({ name: "Message", value: customMessage });
+  }
 
   await interaction.editReply({ embeds: [embed], allowedMentions: { parse: [] } });
 }
