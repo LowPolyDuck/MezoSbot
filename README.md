@@ -11,6 +11,7 @@ A Discord bot for depositing sats from an EVM network (Mezo), and tipping, distr
 - **Distribute**: Split sats among multiple users (e.g. `@user1 @user2 @user3`)
 - **Drop**: Create a drop — first N users to `/claim` get sats (rain/airdrop style)
 - **Browser stream**: Built-in WebRTC viewer endpoint for low-latency cloud play
+- **Auto snapshot recovery**: Emulator saves full state snapshots plus SRAM fallback and resumes from the latest snapshot after restarts/redeploys
 
 ## Setup
 
