@@ -35,6 +35,7 @@ import {
 } from "./drops.js";
 import { supabase } from "./db.js";
 import { extractProfile, updateUserProfile } from "./profile.js";
+import { sendTransferReceivedDm } from "./notifications.js";
 
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled rejection:", (err as Error)?.message ?? err);
@@ -219,11 +220,26 @@ async function handleDropButton(interaction: ButtonInteraction) {
 
   await interaction.deferReply({ ephemeral: true });
 
-  const result = await processClaim(dropId, interaction.user.id);
+  const member = interaction.guild
+    ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
+    : null;
+  const claimantRoleIds = member ? [...member.roles.cache.keys()] : [];
+
+  const result = await processClaim(dropId, interaction.user.id, claimantRoleIds);
 
   if (!result.ok) {
     await interaction.editReply({ content: `❌ ${result.error}` });
     return;
+  }
+
+  if (result.creatorId && typeof result.amountSats === "number") {
+    await sendTransferReceivedDm({
+      client: interaction.client,
+      recipientId: interaction.user.id,
+      senderId: result.creatorId,
+      amountSats: result.amountSats,
+      kind: "drop",
+    });
   }
 
   const { data: drop } = await supabase

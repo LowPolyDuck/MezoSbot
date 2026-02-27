@@ -2,6 +2,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
 import { subtractBalance, addBalance } from "../balance.js";
 import { registerDepositAddress } from "../evm.js";
 import { formatSats, roundSats } from "../format.js";
+import { sendTransferReceivedDm } from "../notifications.js";
 
 export const data = {
   name: "distribute",
@@ -43,11 +44,18 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
   }
 
-  // Parallelize balance additions and address registrations
+  // Parallelize balance additions, address registrations, and recipient DMs.
   await Promise.all(
     validUsers.map(async (uid) => {
       await addBalance(uid, perUser);
-      await registerDepositAddress(uid).catch(() => {}); // Fire-and-forget address registration
+      await registerDepositAddress(uid).catch(() => {});
+      await sendTransferReceivedDm({
+        client: interaction.client,
+        recipientId: uid,
+        senderId: interaction.user.id,
+        amountSats: perUser,
+        kind: "distribute",
+      });
     })
   );
 

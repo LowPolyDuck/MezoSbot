@@ -23,6 +23,7 @@ export interface Drop {
   channel_id: string;
   creator_id: string;
   message_id: string | null;
+  eligible_role_id: string | null;
   total_sats: number;
   per_claim_sats: number;
   max_claims: number;
@@ -39,6 +40,10 @@ export interface ClaimResult {
   remaining?: number;
   /** Whether the drop is now fully claimed */
   completed?: boolean;
+  /** Claimed amount in sats */
+  amountSats?: number;
+  /** Drop creator (sender) */
+  creatorId?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -59,6 +64,10 @@ export function buildDropEmbed(drop: Drop, claimedBy: string[]): EmbedBuilder {
       { name: "Remaining", value: completed ? "✅ All claimed!" : `**${remaining}**`, inline: true },
     )
     .setTimestamp();
+
+  if (drop.eligible_role_id) {
+    embed.addFields({ name: "Eligible Role", value: `<@&${drop.eligible_role_id}>`, inline: true });
+  }
 
   if (claimedBy.length > 0) {
     embed.addFields({
@@ -104,6 +113,7 @@ export async function getClaimants(dropId: number): Promise<string[]> {
 export async function processClaim(
   dropId: number,
   claimantId: string,
+  claimantRoleIds: string[] = [],
 ): Promise<ClaimResult> {
   // Re-fetch the drop to get latest state
   const { data: drop } = await supabase
@@ -118,6 +128,11 @@ export async function processClaim(
 
   if (drop.creator_id === claimantId) {
     return { ok: false, error: "You can't claim your own drop." };
+  }
+
+  const eligibleRoleId = drop.eligible_role_id as string | null | undefined;
+  if (eligibleRoleId && !claimantRoleIds.includes(eligibleRoleId)) {
+    return { ok: false, error: `Only members with <@&${eligibleRoleId}> can claim this drop.` };
   }
 
   // Check if already claimed
@@ -161,6 +176,8 @@ export async function processClaim(
     newCount,
     remaining: drop.max_claims - newCount,
     completed,
+    amountSats: drop.per_claim_sats,
+    creatorId: drop.creator_id,
   };
 }
 

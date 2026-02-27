@@ -11,6 +11,7 @@ export const data = {
     { name: "total", type: 10 as const, description: "Total sats to drop (e.g. 100 or 100.5)", required: true, minValue: 0.000001 },
     { name: "per_claim", type: 10 as const, description: "Sats per claim (e.g. 10 or 10.5)", required: true, minValue: 0.000001 },
     { name: "max_claims", type: 4 as const, description: "Max number of claims", required: true, minValue: 1 },
+    { name: "role", type: 8 as const, description: "Only members with this role can claim", required: false },
   ],
 };
 
@@ -18,6 +19,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const total = roundSats(interaction.options.getNumber("total", true));
   const perClaim = roundSats(interaction.options.getNumber("per_claim", true));
   const maxClaims = interaction.options.getInteger("max_claims", true);
+  const role = interaction.options.getRole("role");
 
   if (perClaim * maxClaims > total) {
     return interaction.reply({
@@ -40,6 +42,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       total_sats: total,
       per_claim_sats: perClaim,
       max_claims: maxClaims,
+      eligible_role_id: role?.id ?? null,
     })
     .select("id")
     .single();
@@ -55,6 +58,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     channel_id: interaction.channelId!,
     creator_id: interaction.user.id,
     message_id: null,
+    eligible_role_id: role?.id ?? null,
     total_sats: total,
     per_claim_sats: perClaim,
     max_claims: maxClaims,

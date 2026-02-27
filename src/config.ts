@@ -39,6 +39,8 @@ export const config = {
     minBid: parseFloat(optional("GB_MIN_BID", "0.001")),
     /** Democracy round duration in ms — votes collected, button with highest total sats wins */
     roundMs: parseInt(optional("GB_ROUND_MS", "500"), 10),
+    /** Full snapshot auto-save interval in ms */
+    snapshotIntervalMs: parseInt(optional("GB_SNAPSHOT_INTERVAL_MS", "300000"), 10),
   },
   streaming: {
     port: parseInt(optional("STREAM_PORT", optional("PORT", "8787")), 10),
