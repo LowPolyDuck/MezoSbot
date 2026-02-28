@@ -280,6 +280,9 @@ async function handleDropButton(interaction: ButtonInteraction) {
 /* ── Main ─────────────────────────────────────────────────────── */
 
 async function main() {
+  // ── Web canvas server (start first — Render needs an open port quickly) ──
+  await startStream();
+
   initEVM();
   console.log(`Treasury: ${getTreasuryAddress()}`);
 
@@ -325,9 +328,6 @@ async function main() {
   } else {
     console.log("[GameBoy] ROM_PATH not set — emulator disabled");
   }
-
-  // ── Web canvas server (always starts — needed for Render health checks) ──
-  await startStream();
 }
 
 // Graceful shutdown: save game state before exit
