@@ -1,5 +1,5 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
-import { subtractBalance, addBalance } from "../balance.js";
+import { subtractBalance, addBalance, getBalance } from "../balance.js";
 import { registerDepositAddress } from "../evm.js";
 import { formatSats } from "../format.js";
 import { sendTransferReceivedDm } from "../notifications.js";
@@ -31,6 +31,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (target.bot) {
     return interaction.reply({ content: "❌ You can't tip bots.", ephemeral: true });
+  }
+
+  const balance = await getBalance(interaction.user.id);
+  if (balance < amount) {
+    return interaction.reply({ content: "❌ Insufficient balance.", ephemeral: true });
   }
 
   await interaction.deferReply();
