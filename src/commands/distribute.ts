@@ -1,5 +1,5 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
-import { subtractBalance, addBalance } from "../balance.js";
+import { subtractBalance, addBalance, getBalance } from "../balance.js";
 import { registerDepositAddress } from "../evm.js";
 import { formatSats, roundSats } from "../format.js";
 import { sendTransferReceivedDm } from "../notifications.js";
@@ -36,9 +36,13 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
-  await interaction.deferReply();
-
   const totalNeeded = roundSats(perUser * validUsers.length);
+  const balance = await getBalance(interaction.user.id);
+  if (balance < totalNeeded) {
+    return interaction.reply({ content: "❌ Insufficient balance.", ephemeral: true });
+  }
+
+  await interaction.deferReply();
 
   if (!(await subtractBalance(interaction.user.id, totalNeeded))) {
     return interaction.editReply({ content: "❌ Insufficient balance." });
