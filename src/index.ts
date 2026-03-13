@@ -76,6 +76,10 @@ client.once(Events.ClientReady, async (c) => {
   );
   console.log(`Slash commands registered (${commandsData.length} commands)`);
 
+  // Log game channel config for diagnostics
+  const configuredChannelId = config.gameboy.gameChannelId;
+  console.log(`[GB] Game channel ID configured: "${configuredChannelId || "(not set)"}"${!configuredChannelId ? " — text input will be DISABLED" : ""}`);
+
   // Pre-cache the game channel so we never fetch it during gameplay
   const gcId = config.gameboy.gameChannelId;
   if (gcId) {
@@ -118,19 +122,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 /* ────────────────────────────────────────────────────────────────── */
 /*  Game Boy text input listener                                      */
-/*  ZERO async. No awaits. No API calls. Instant.                     */
 /* ────────────────────────────────────────────────────────────────── */
 
-client.on(Events.MessageCreate, (message) => {
+client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+
   const gameChannelId = config.gameboy.gameChannelId;
   if (!gameChannelId || message.channelId !== gameChannelId) return;
 
-  console.log(`[GB] Message in game channel: "${message.content}" from ${message.author.tag}`);
+  console.log(`[GB] Message in game channel: "${message.content}" from ${message.author.tag} (channel=${message.channelId})`);
+
+  if (!message.content) {
+    console.warn("[GB] message.content is empty — is the MESSAGE_CONTENT privileged intent enabled in the Discord Developer Portal?");
+    return;
+  }
 
   const parts = message.content.trim().toLowerCase().split(/\s+/);
   const button = TEXT_INPUT_MAP.get(parts[0]);
-  if (!button) return; // not a valid input — ignore, don't even delete
+  if (!button) return; // not a valid input — ignore
 
   // Parse optional tip amount
   const minBid = config.gameboy.minBid;
@@ -140,8 +149,15 @@ client.on(Events.MessageCreate, (message) => {
     if (!isNaN(p) && p > 0) amount = Math.max(p, minBid);
   }
 
-  // Submit bid — synchronous, instant, no blocking
-  submitBid(message.author.id, button, amount);
+  // Check balance before accepting bid
+  const balance = await getBalance(message.author.id);
+  if (balance < amount) {
+    return; // silent rejection — don't spam the channel
+  }
+
+  // Submit bid
+  const result = submitBid(message.author.id, button, amount);
+  if (!result.ok) return;
 
   // Ensure user has a deposit address (fire-and-forget, first time only)
   registerDepositAddress(message.author.id).catch(() => {});
