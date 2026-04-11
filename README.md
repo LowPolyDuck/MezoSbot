@@ -44,6 +44,8 @@ cp .env.example .env
 | `STREAM_MIN_FPS` / `STREAM_MAX_FPS` | Auto-tuning floor/ceiling |
 | `STREAM_AUTO_TUNE` | Enables adaptive FPS under load (`true`/`false`) |
 | `STUN_SERVERS` | Comma-separated STUN servers for WebRTC |
+| `DEPOSIT_POLL_MS` | Deposit wallet chain polling interval (default `15000`) |
+| `DEPOSIT_ADDRESS_REFRESH_MS` | Supabase address-list cache refresh interval (default `300000`) |
 
 ### 2.1 WebRTC Runtime Dependency
 
