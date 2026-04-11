@@ -61,16 +61,114 @@ export function getUserDepositAddress(discordId: string): string {
   return getUserDepositWallet(discordId).address;
 }
 
+type DepositAddressRow = {
+  discord_id: string;
+  address: string;
+  last_checked_balance: string | null;
+};
+
+const depositAddressCache = new Map<string, DepositAddressRow>();
+const depositRegistrationPromises = new Map<string, Promise<string>>();
+let depositAddressCacheLoadedAt = 0;
+let depositAddressCacheRefresh: Promise<void> | null = null;
+
+function normalizeDepositRow(row: DepositAddressRow): DepositAddressRow {
+  return {
+    discord_id: row.discord_id,
+    address: row.address.toLowerCase(),
+    last_checked_balance: row.last_checked_balance ?? "0",
+  };
+}
+
+async function refreshDepositAddressCache(force = false): Promise<void> {
+  const now = Date.now();
+  if (
+    !force &&
+    depositAddressCacheLoadedAt > 0 &&
+    now - depositAddressCacheLoadedAt < config.deposits.addressRefreshMs
+  ) {
+    return;
+  }
+
+  if (depositAddressCacheRefresh) return depositAddressCacheRefresh;
+
+  depositAddressCacheRefresh = (async () => {
+    const { data, error } = await supabase
+      .from("deposit_addresses")
+      .select("discord_id, address, last_checked_balance");
+
+    if (error) {
+      console.error("Failed to refresh deposit address cache:", error.message);
+      return;
+    }
+
+    depositAddressCache.clear();
+    for (const row of (data ?? []) as DepositAddressRow[]) {
+      const normalized = normalizeDepositRow(row);
+      depositAddressCache.set(normalized.discord_id, normalized);
+    }
+    depositAddressCacheLoadedAt = Date.now();
+  })().finally(() => {
+    depositAddressCacheRefresh = null;
+  });
+
+  return depositAddressCacheRefresh;
+}
+
 /** Register a user's deposit address for polling */
 export async function registerDepositAddress(discordId: string): Promise<string> {
   const address = getUserDepositAddress(discordId);
-  await supabase
-    .from("deposit_addresses")
-    .upsert(
-      { discord_id: discordId, address: address.toLowerCase() },
-      { onConflict: "discord_id", ignoreDuplicates: true }
+  const normalizedAddress = address.toLowerCase();
+  const cached = depositAddressCache.get(discordId);
+
+  if (cached?.address === normalizedAddress) return address;
+
+  const pending = depositRegistrationPromises.get(discordId);
+  if (pending) return pending;
+
+  const registration = (async () => {
+    const { data, error } = await supabase
+      .from("deposit_addresses")
+      .upsert(
+        { discord_id: discordId, address: normalizedAddress },
+        { onConflict: "discord_id", ignoreDuplicates: true }
+      )
+      .select("discord_id, address, last_checked_balance")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    let row = data as DepositAddressRow | null;
+
+    if (!row) {
+      const { data: existing, error: existingError } = await supabase
+        .from("deposit_addresses")
+        .select("discord_id, address, last_checked_balance")
+        .eq("discord_id", discordId)
+        .maybeSingle();
+
+      if (existingError) throw existingError;
+      row = existing as DepositAddressRow | null;
+    }
+
+    depositAddressCache.set(
+      discordId,
+      normalizeDepositRow(
+        row ?? {
+          discord_id: discordId,
+          address: normalizedAddress,
+          last_checked_balance: "0",
+        }
+      )
     );
-  return address;
+
+    return address;
+  })().finally(() => {
+    depositRegistrationPromises.delete(discordId);
+  });
+
+  depositRegistrationPromises.set(discordId, registration);
+  return registration;
 }
 
 /**
@@ -176,8 +274,6 @@ export async function fundGasAndSweep(discordId: string): Promise<string | null>
   return sweepToTreasury(discordId);
 }
 
-type DepositAddressRow = { discord_id: string; address: string; last_checked_balance: string };
-
 /**
  * Poll all registered deposit addresses for new funds.
  * Auto-credits users and immediately sweeps funds to treasury.
@@ -190,86 +286,98 @@ type DepositAddressRow = { discord_id: string; address: string; last_checked_bal
 export function startDepositPoller(
   onDeposit?: (discordId: string, amountSats: number, gasSats: number) => void
 ) {
+  let isPolling = false;
+
   const poll = async () => {
-    const { data: rows } = await supabase
-      .from("deposit_addresses")
-      .select("*");
-
-    if (!rows || rows.length === 0) return;
-
-    // Parallelize all balance checks
-    const balanceChecks = await Promise.allSettled(
-      (rows as DepositAddressRow[]).map(async (row) => {
-        const bal = await provider.getBalance(row.address);
-        return { row, bal };
-      })
-    );
-
-    // Process results and credit new deposits
-    const updates: Array<{ discord_id: string; balance: string }> = [];
-
-    for (const result of balanceChecks) {
-      if (result.status === 'rejected') continue;
-
-      const { row, bal } = result.value;
-      const prev = BigInt(row.last_checked_balance || "0");
-
-      // ── Credit only when balance INCREASES (new deposit arrived) ──
-      if (bal > prev) {
-        const diff = bal - prev;
-
-        // Exact gas cost — matches the pinned gasPrice on the sweep tx
-        const gasPrice = await getGasPrice();
-        const gasCost = 21000n * gasPrice;
-        const netDeposit = diff - gasCost;
-
-        if (netDeposit > 0n) {
-          const netSats = tokenUnitsToSats(netDeposit);
-          const gasSats = tokenUnitsToSats(gasCost);
-
-          if (netSats > 0) {
-            const txId = `auto-${Date.now()}-${row.discord_id}`;
-            await supabase.from("deposits").insert({
-              discord_id: row.discord_id,
-              tx_hash: txId,
-              amount_sats: netSats,
-              block_number: 0,
-            });
-            await addBalance(row.discord_id, netSats);
-            onDeposit?.(row.discord_id, netSats, gasSats);
-          }
-        } else {
-          console.log(
-            `Deposit too small to cover gas for ${row.discord_id}: ${diff} wei < gas ${gasCost} wei`
-          );
-        }
-
-        // ── Sweep immediately after crediting a new deposit ──
-        sweepToTreasury(row.discord_id).catch((err) => {
-          console.error(
-            `Sweep failed for ${row.discord_id}:`,
-            (err as Error)?.message ?? err
-          );
-        });
-      }
-
-      // Collect balance update for batch processing
-      updates.push({ discord_id: row.discord_id, balance: bal.toString() });
+    if (isPolling) {
+      console.warn("Deposit poll skipped: previous poll is still running");
+      return;
     }
 
-    // ── Batch update all balances in parallel ──
-    await Promise.all(
-      updates.map((u) =>
-        supabase
-          .from("deposit_addresses")
-          .update({ last_checked_balance: u.balance })
-          .eq("discord_id", u.discord_id)
-      )
-    );
+    isPolling = true;
+
+    try {
+      await refreshDepositAddressCache(depositAddressCacheLoadedAt === 0);
+      const rows = Array.from(depositAddressCache.values());
+
+      if (rows.length === 0) return;
+
+      const balanceChecks = await Promise.allSettled(
+        rows.map(async (row) => {
+          const bal = await provider.getBalance(row.address);
+          return { row, bal };
+        })
+      );
+
+      const updates: Array<{ row: DepositAddressRow; balance: string }> = [];
+
+      for (const result of balanceChecks) {
+        if (result.status === "rejected") continue;
+
+        const { row, bal } = result.value;
+        const prev = BigInt(row.last_checked_balance || "0");
+
+        // Credit only when balance INCREASES (new deposit arrived).
+        if (bal > prev) {
+          const diff = bal - prev;
+
+          // Exact gas cost: matches the pinned gasPrice on the sweep tx.
+          const gasPrice = await getGasPrice();
+          const gasCost = 21000n * gasPrice;
+          const netDeposit = diff - gasCost;
+
+          if (netDeposit > 0n) {
+            const netSats = tokenUnitsToSats(netDeposit);
+            const gasSats = tokenUnitsToSats(gasCost);
+
+            if (netSats > 0) {
+              const txId = `auto-${Date.now()}-${row.discord_id}`;
+              await supabase.from("deposits").insert({
+                discord_id: row.discord_id,
+                tx_hash: txId,
+                amount_sats: netSats,
+                block_number: 0,
+              });
+              await addBalance(row.discord_id, netSats);
+              onDeposit?.(row.discord_id, netSats, gasSats);
+            }
+          } else {
+            console.log(
+              `Deposit too small to cover gas for ${row.discord_id}: ${diff} wei < gas ${gasCost} wei`
+            );
+          }
+
+          // Sweep immediately after crediting a new deposit.
+          sweepToTreasury(row.discord_id).catch((err) => {
+            console.error(
+              `Sweep failed for ${row.discord_id}:`,
+              (err as Error)?.message ?? err
+            );
+          });
+        }
+
+        if (bal !== prev) {
+          updates.push({ row, balance: bal.toString() });
+        }
+      }
+
+      await Promise.all(
+        updates.map(async ({ row, balance }) => {
+          await supabase
+            .from("deposit_addresses")
+            .update({ last_checked_balance: balance })
+            .eq("discord_id", row.discord_id);
+
+          row.last_checked_balance = balance;
+          depositAddressCache.set(row.discord_id, row);
+        })
+      );
+    } finally {
+      isPolling = false;
+    }
   };
 
-  // Poll every 15 seconds
-  setInterval(poll, 15_000);
+  setInterval(poll, config.deposits.pollMs);
   // Initial poll after 5s (let bot finish starting)
   setTimeout(poll, 5_000);
 }
