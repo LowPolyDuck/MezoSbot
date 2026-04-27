@@ -32,8 +32,8 @@ export const config = {
   depositWebUrl: optional("DEPOSIT_WEB_URL", "https://deposit.mallard.sh/sbot"),
   depositAdminOnly: process.env.DEPOSIT_ADMIN_ONLY === "1" || process.env.DEPOSIT_ADMIN_ONLY === "true",
   deposits: {
-    pollMs: parseInt(optional("DEPOSIT_POLL_MS", "15000"), 10),
-    addressRefreshMs: parseInt(optional("DEPOSIT_ADDRESS_REFRESH_MS", "300000"), 10),
+    pollMs: parseInt(optional("DEPOSIT_POLL_MS", "60000"), 10),
+    addressRefreshMs: parseInt(optional("DEPOSIT_ADDRESS_REFRESH_MS", "900000"), 10),
   },
   gameboy: {
     /** Text channel where users type button names to play */

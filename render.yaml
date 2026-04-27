@@ -39,6 +39,10 @@ services:
         value: "false"
       - key: DEPOSIT_ADMIN_ONLY
         value: "false"
+      - key: DEPOSIT_POLL_MS
+        value: "60000"
+      - key: DEPOSIT_ADDRESS_REFRESH_MS
+        value: "900000"
       - key: GB_CHANNEL_ID
         sync: false
       - key: ROM_PATH

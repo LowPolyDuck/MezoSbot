@@ -71,6 +71,7 @@ const depositAddressCache = new Map<string, DepositAddressRow>();
 const depositRegistrationPromises = new Map<string, Promise<string>>();
 let depositAddressCacheLoadedAt = 0;
 let depositAddressCacheRefresh: Promise<void> | null = null;
+const DEPOSIT_UPDATE_BATCH_SIZE = 500;
 
 function normalizeDepositRow(row: DepositAddressRow): DepositAddressRow {
   return {
@@ -113,6 +114,44 @@ async function refreshDepositAddressCache(force = false): Promise<void> {
   });
 
   return depositAddressCacheRefresh;
+}
+
+async function updateDepositAddressBalances(
+  updates: Array<{ row: DepositAddressRow; balance: string }>,
+): Promise<void> {
+  if (updates.length === 0) return;
+
+  for (let i = 0; i < updates.length; i += DEPOSIT_UPDATE_BATCH_SIZE) {
+    const batch = updates.slice(i, i + DEPOSIT_UPDATE_BATCH_SIZE);
+    const payload = batch.map(({ row, balance }) => ({
+      discord_id: row.discord_id,
+      last_checked_balance: balance,
+    }));
+
+    const { error } = await supabase.rpc("update_deposit_address_balances", {
+      p_updates: payload,
+    });
+
+    if (error) {
+      console.warn(
+        "Batch deposit balance update failed; falling back to per-row updates:",
+        error.message
+      );
+      await Promise.all(
+        batch.map(async ({ row, balance }) => {
+          await supabase
+            .from("deposit_addresses")
+            .update({ last_checked_balance: balance })
+            .eq("discord_id", row.discord_id);
+        })
+      );
+    }
+
+    for (const { row, balance } of batch) {
+      row.last_checked_balance = balance;
+      depositAddressCache.set(row.discord_id, row);
+    }
+  }
 }
 
 /** Register a user's deposit address for polling */
@@ -193,6 +232,26 @@ async function getGasPrice(): Promise<bigint> {
 
   // 3) Conservative fallback based on observed Mezo gas (~1.3M wei/gas)
   return 2_000_000n;
+}
+
+const NATIVE_TRANSFER_GAS_LIMIT = 21000n;
+
+function addGasLimitBuffer(estimatedGas: bigint): bigint {
+  if (estimatedGas <= NATIVE_TRANSFER_GAS_LIMIT) return NATIVE_TRANSFER_GAS_LIMIT;
+  return estimatedGas + estimatedGas / 5n + 1000n;
+}
+
+async function estimateNativeTransferGas(to: string, value: bigint): Promise<bigint> {
+  const code = await provider.getCode(to);
+  if (code === "0x") return NATIVE_TRANSFER_GAS_LIMIT;
+
+  const estimatedGas = await provider.estimateGas({
+    from: wallet.address,
+    to,
+    value,
+  });
+
+  return addGasLimitBuffer(estimatedGas);
 }
 
 /**
@@ -361,17 +420,7 @@ export function startDepositPoller(
         }
       }
 
-      await Promise.all(
-        updates.map(async ({ row, balance }) => {
-          await supabase
-            .from("deposit_addresses")
-            .update({ last_checked_balance: balance })
-            .eq("discord_id", row.discord_id);
-
-          row.last_checked_balance = balance;
-          depositAddressCache.set(row.discord_id, row);
-        })
-      );
+      await updateDepositAddressBalances(updates);
     } finally {
       isPolling = false;
     }
@@ -405,15 +454,40 @@ export async function withdraw(
   if (value <= 0n) return { error: "Amount too small" };
 
   const gasPrice = await getGasPrice();
-  const gasLimit = 21000n;
-  const gasCost = gasLimit * gasPrice;
-  // 50% buffer on withdrawals — treasury keeps the surplus
-  const chargedGas = gasCost + gasCost / 2n;
-  const gasSats = tokenUnitsToSats(chargedGas);
+  let gasLimit: bigint;
+  try {
+    gasLimit = await estimateNativeTransferGas(normalized, value);
+  } catch (e: unknown) {
+    const err = e as { message?: string; reason?: string };
+    return { error: `Unable to estimate withdrawal gas: ${err?.reason ?? err?.message ?? String(e)}` };
+  }
 
-  const sendValue = value - chargedGas;
+  let gasCost = gasLimit * gasPrice;
+  // 50% buffer on withdrawals — treasury keeps the surplus
+  let chargedGas = gasCost + gasCost / 2n;
+  let gasSats = tokenUnitsToSats(chargedGas);
+
+  let sendValue = value - chargedGas;
   if (sendValue <= 0n) {
     return { error: `Amount too small to cover network gas (~${gasSats} sats)` };
+  }
+
+  try {
+    const refinedGasLimit = await estimateNativeTransferGas(normalized, sendValue);
+    if (refinedGasLimit > gasLimit) {
+      gasLimit = refinedGasLimit;
+      gasCost = gasLimit * gasPrice;
+      chargedGas = gasCost + gasCost / 2n;
+      gasSats = tokenUnitsToSats(chargedGas);
+      sendValue = value - chargedGas;
+
+      if (sendValue <= 0n) {
+        return { error: `Amount too small to cover network gas (~${gasSats} sats)` };
+      }
+    }
+  } catch (e: unknown) {
+    const err = e as { message?: string; reason?: string };
+    return { error: `Unable to estimate withdrawal gas: ${err?.reason ?? err?.message ?? String(e)}` };
   }
 
   const sentSats = tokenUnitsToSats(sendValue);

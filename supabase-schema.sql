@@ -109,6 +109,47 @@ BEGIN
 END;
 $func$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION subtract_balances_batch(p_debits JSONB)
+RETURNS void AS $$
+BEGIN
+  WITH debits AS (
+    SELECT
+      discord_id,
+      SUM(amount) AS amount
+    FROM jsonb_to_recordset(p_debits) AS x(discord_id TEXT, amount DOUBLE PRECISION)
+    WHERE discord_id IS NOT NULL
+      AND amount > 0
+    GROUP BY discord_id
+  )
+  UPDATE users u
+  SET balance_sats = u.balance_sats - d.amount,
+      updated_at = now()
+  FROM debits d
+  WHERE u.discord_id = d.discord_id
+    AND u.balance_sats >= d.amount;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION update_deposit_address_balances(p_updates JSONB)
+RETURNS void AS $$
+BEGIN
+  WITH updates AS (
+    SELECT DISTINCT ON (discord_id)
+      discord_id,
+      last_checked_balance
+    FROM jsonb_to_recordset(p_updates) AS x(discord_id TEXT, last_checked_balance TEXT)
+    WHERE discord_id IS NOT NULL
+      AND last_checked_balance IS NOT NULL
+    ORDER BY discord_id
+  )
+  UPDATE deposit_addresses d
+  SET last_checked_balance = u.last_checked_balance
+  FROM updates u
+  WHERE d.discord_id = u.discord_id
+    AND d.last_checked_balance IS DISTINCT FROM u.last_checked_balance;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TABLE IF NOT EXISTS game_saves (
   rom_name   TEXT PRIMARY KEY,
   save_data  TEXT NOT NULL,
