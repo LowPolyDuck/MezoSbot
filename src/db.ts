@@ -3,7 +3,19 @@ import { config } from "./config.js";
 
 export const supabase: SupabaseClient = createClient(
   config.supabase.url,
-  config.supabase.serviceRoleKey
+  config.supabase.serviceRoleKey,
+  {
+    auth: {
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      persistSession: false,
+    },
+    realtime: {
+      params: {
+        eventsPerSecond: 1,
+      },
+    },
+  }
 );
 
 // Type exports for convenience

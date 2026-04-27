@@ -48,6 +48,30 @@ export async function subtractBalance(discordId: string, amountSats: number): Pr
   return data === true;
 }
 
+export async function subtractBalances(
+  debits: Array<{ discordId: string; amountSats: number }>,
+): Promise<void> {
+  const payload = debits
+    .map((debit) => ({
+      discord_id: debit.discordId,
+      amount: roundSats(debit.amountSats),
+    }))
+    .filter((debit) => debit.discord_id && debit.amount > 0);
+
+  if (payload.length === 0) return;
+
+  const { error } = await supabase.rpc("subtract_balances_batch", {
+    p_debits: payload,
+  });
+
+  if (!error) return;
+
+  console.warn("Batch balance debit failed; falling back to per-user debits:", error.message);
+  await Promise.all(
+    payload.map((debit) => subtractBalance(debit.discord_id, debit.amount).catch(() => false)),
+  );
+}
+
 export async function linkWallet(discordId: string, walletAddress: string): Promise<{ ok: boolean; error?: string }> {
   const normalized = walletAddress.toLowerCase().trim();
   if (!/^0x[a-f0-9]{40}$/.test(normalized)) return { ok: false, error: "Invalid EVM address" };

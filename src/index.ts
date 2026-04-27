@@ -25,7 +25,7 @@ import {
   type RoundResult,
 } from "./emulator.js";
 import { startStream } from "./stream.js";
-import { getBalance, subtractBalance } from "./balance.js";
+import { getBalance, subtractBalances } from "./balance.js";
 import {
   processClaim,
   buildDropEmbed,
@@ -182,9 +182,9 @@ function setupGameBoyCallbacks() {
     const { winningButton, winners, winningSats, tally, totalBids } = result;
 
     // ── Charge all winning voters — fire and forget ──
-    for (const bid of winners) {
-      subtractBalance(bid.userId, bid.amount).catch(() => {});
-    }
+    subtractBalances(
+      winners.map((bid) => ({ discordId: bid.userId, amountSats: bid.amount }))
+    ).catch(() => {});
 
     // ── Update feed message — throttled, non-blocking ──
     const now = Date.now();
