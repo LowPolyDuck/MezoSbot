@@ -15,6 +15,7 @@ import * as backfill from "./backfill.js";
 import * as credit from "./credit.js";
 import * as sweep from "./sweep.js";
 import { gameboyCommands } from "./gameboy.js";
+import { config } from "../config.js";
 
 const baseCommands = [
   link,
@@ -37,7 +38,7 @@ const baseCommands = [
 // Merge base commands + gameboy button commands into a single list
 export const commands = [
   ...baseCommands,
-  ...gameboyCommands,
+  ...(config.gameboy.enabled ? gameboyCommands : []),
 ];
 
 export const commandsData: RESTPostAPIChatInputApplicationCommandsJSONBody[] = commands.map(

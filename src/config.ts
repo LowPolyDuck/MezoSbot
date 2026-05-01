@@ -10,6 +10,12 @@ function optional(key: string, def: string): string {
   return process.env[key] ?? def;
 }
 
+function optionalBool(key: string, def: boolean): boolean {
+  const val = process.env[key];
+  if (val === undefined) return def;
+  return val === "1" || val.toLowerCase() === "true";
+}
+
 export const config = {
   discord: {
     token: required("DISCORD_TOKEN"),
@@ -36,6 +42,7 @@ export const config = {
     addressRefreshMs: parseInt(optional("DEPOSIT_ADDRESS_REFRESH_MS", "900000"), 10),
   },
   gameboy: {
+    enabled: optionalBool("POKEMON_ENABLED", true),
     /** Text channel where users type button names to play */
     gameChannelId: optional("GB_CHANNEL_ID", ""),
     romPath: optional("ROM_PATH", ""),
