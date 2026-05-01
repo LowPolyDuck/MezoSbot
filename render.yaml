@@ -43,6 +43,8 @@ services:
         value: "60000"
       - key: DEPOSIT_ADDRESS_REFRESH_MS
         value: "900000"
+      - key: POKEMON_ENABLED
+        value: "true"
       - key: GB_CHANNEL_ID
         sync: false
       - key: ROM_PATH

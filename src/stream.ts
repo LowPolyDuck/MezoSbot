@@ -64,6 +64,29 @@ function streamBaseUrl(): string {
 }
 
 function buildViewerHtml(): string {
+  if (!config.gameboy.enabled) {
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MezoSbot</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0d12; color: #e7edf7; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    main { max-width: 520px; padding: 24px; }
+    h1 { margin: 0 0 8px 0; font-size: 22px; }
+    p { margin: 0; color: #a9b3c7; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Pokemon is disabled</h1>
+    <p>The bot is running, but the Game Boy stream and controls are off.</p>
+  </main>
+</body>
+</html>`;
+  }
+
   const ws = GB_WIDTH * config.streaming.viewerScale;
   const hs = GB_HEIGHT * config.streaming.viewerScale;
   const wsUrl = `ws://${process.env.RENDER ? '${window.location.host}' : '0.0.0.0:' + config.streaming.port}`;
@@ -255,6 +278,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
   if (method === "GET" && url.pathname === "/healthz") {
     sendJson(res, 200, {
       status: "ok",
+      pokemonEnabled: config.gameboy.enabled,
       stream: {
         ...stats,
         targetFps,
@@ -265,6 +289,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 
   if (method === "GET" && url.pathname === "/metrics") {
     sendJson(res, 200, {
+      pokemonEnabled: config.gameboy.enabled,
       stream: {
         ...stats,
         targetFps,
@@ -279,20 +304,22 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 export async function startStream(): Promise<void> {
   if (httpServer) return;
 
-  // Subscribe to emulator frames and forward immediately (no sampling loop)
-  unsubscribeFrames = subscribeFrames((meta) => {
-    latestObservedFrame = meta;
-    stats.producedFrames += 1;
-    stats.lastSourceFrameAtMs = meta.capturedAtMs;
+  if (config.gameboy.enabled) {
+    // Subscribe to emulator frames and forward immediately (no sampling loop)
+    unsubscribeFrames = subscribeFrames((meta) => {
+      latestObservedFrame = meta;
+      stats.producedFrames += 1;
+      stats.lastSourceFrameAtMs = meta.capturedAtMs;
 
-    // Send frame immediately as emulator produces it
-    const ref = getLatestFrameRef();
-    if (ref) {
-      pushFrameToClients(ref.frame).catch((err) => {
-        console.error("[Stream] Compression error:", (err as Error)?.message ?? err);
-      });
-    }
-  });
+      // Send frame immediately as emulator produces it
+      const ref = getLatestFrameRef();
+      if (ref) {
+        pushFrameToClients(ref.frame).catch((err) => {
+          console.error("[Stream] Compression error:", (err as Error)?.message ?? err);
+        });
+      }
+    });
+  }
 
   await new Promise<void>((resolve) => {
     httpServer = createServer((req, res) => {
@@ -302,43 +329,49 @@ export async function startStream(): Promise<void> {
       });
     });
 
-    // WebSocket server with optimized settings
-    wss = new WebSocketServer({
-      server: httpServer,
-      path: "/stream",
-      perMessageDeflate: false, // Disable compression for lower latency
-      maxPayload: 10 * 1024 * 1024 // 10MB max payload
-    });
-
-    wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-      const clientId = `ws-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-
-      streamClients.set(clientId, {
-        id: clientId,
-        ws,
-        connectedAtMs: Date.now(),
-      });
-      stats.activeClients = streamClients.size;
-
-      console.log(`[Stream] WebSocket client ${clientId} connected (${streamClients.size} active)`);
-
-      ws.on("close", () => {
-        removeClient(clientId);
+    if (config.gameboy.enabled) {
+      // WebSocket server with optimized settings
+      wss = new WebSocketServer({
+        server: httpServer,
+        path: "/stream",
+        perMessageDeflate: false, // Disable compression for lower latency
+        maxPayload: 10 * 1024 * 1024 // 10MB max payload
       });
 
-      ws.on("error", () => {
-        removeClient(clientId);
+      wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+        const clientId = `ws-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+        streamClients.set(clientId, {
+          id: clientId,
+          ws,
+          connectedAtMs: Date.now(),
+        });
+        stats.activeClients = streamClients.size;
+
+        console.log(`[Stream] WebSocket client ${clientId} connected (${streamClients.size} active)`);
+
+        ws.on("close", () => {
+          removeClient(clientId);
+        });
+
+        ws.on("error", () => {
+          removeClient(clientId);
+        });
       });
-    });
+    }
 
     httpServer.listen(config.streaming.port, "0.0.0.0", () => {
       resolve();
     });
   });
 
-  console.log(`[Stream] Canvas+WebSocket viewer ready at ${streamBaseUrl()}/`);
+  console.log(`[Stream] HTTP server ready at ${streamBaseUrl()}/`);
   console.log(`[Stream] Health endpoint: ${streamBaseUrl()}/healthz`);
-  console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} @ ${targetFps}fps with zlib compression`);
+  if (config.gameboy.enabled) {
+    console.log(`[Stream] ${GB_WIDTH}x${GB_HEIGHT} @ ${targetFps}fps with zlib compression`);
+  } else {
+    console.log("[Stream] Pokemon disabled; WebSocket stream is off");
+  }
 }
 
 export function stopStream(): void {

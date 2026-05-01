@@ -76,6 +76,11 @@ client.once(Events.ClientReady, async (c) => {
   );
   console.log(`Slash commands registered (${commandsData.length} commands)`);
 
+  if (!config.gameboy.enabled) {
+    console.log("[Pokemon] Disabled by POKEMON_ENABLED=false");
+    return;
+  }
+
   // Log game channel config for diagnostics
   const configuredChannelId = config.gameboy.gameChannelId;
   console.log(`[GB] Game channel ID configured: "${configuredChannelId || "(not set)"}"${!configuredChannelId ? " — text input will be DISABLED" : ""}`);
@@ -126,6 +131,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+  if (!config.gameboy.enabled) return;
 
   const gameChannelId = config.gameboy.gameChannelId;
   if (!gameChannelId || message.channelId !== gameChannelId) return;
@@ -176,6 +182,7 @@ let lastFeedTime = 0;
 const FEED_THROTTLE_MS = 1000; // max 1 Discord message edit per second
 
 function setupGameBoyCallbacks() {
+  if (!config.gameboy.enabled) return;
   if (!config.gameboy.gameChannelId) return;
 
   onRound((result: RoundResult) => {
@@ -331,6 +338,11 @@ async function main() {
   });
 
   await client.login(config.discord.token);
+
+  if (!config.gameboy.enabled) {
+    console.log("[Pokemon] POKEMON_ENABLED=false - emulator and controls disabled");
+    return;
+  }
 
   // ── Game Boy emulator ──
   const { romPath } = config.gameboy;
